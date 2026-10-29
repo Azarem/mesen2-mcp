@@ -53,6 +53,11 @@ namespace Mesen
 
 			Environment.CurrentDirectory = ConfigManager.HomeFolder;
 
+			if(CommandLineHelper.IsMcpServer(args)) {
+				DependencyHelper.ExtractNativeDependencies(ConfigManager.HomeFolder);
+				return Mcp.McpServerRunner.Run(args);
+			}
+
 			if(!File.Exists(ConfigManager.GetConfigFile())) {
 				//Could not find configuration file, show wizard
 				DependencyHelper.ExtractNativeDependencies(ConfigManager.HomeFolder);
