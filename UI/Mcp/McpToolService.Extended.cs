@@ -611,7 +611,7 @@ namespace Mesen.Mcp
 
 		/// <summary>
 		/// Advances frames. While scripts are loaded the advance is chunked and the native script
-		/// logs (capped at 500 rows / 100000 bytes each) are harvested between chunks so no output is lost;
+		/// logs (capped at the last 500 rows each) are harvested between chunks so no output is lost;
 		/// the chunk size adapts to how chatty the scripts are.
 		/// </summary>
 		/// <param name="shouldStop">Checked after every chunk (after harvesting); true ends the run with stopReason "script_done".</param>
@@ -865,7 +865,7 @@ namespace Mesen.Mcp
 			}
 			long frame = GetFrameCount(cpu);
 			foreach(KeyValuePair<string, int> script in _scriptIds) {
-				string log = DebugApi.GetScriptLog(script.Value) ?? "";
+				string log = McpNative.GetScriptLog(script.Value, McpScriptLogStore.NativeLogBytes);
 				fill = Math.Max(fill, _logStore.Harvest(script.Value, script.Key, log, frame).Fill);
 			}
 			AfterHarvest(cpu);
@@ -874,7 +874,7 @@ namespace Mesen.Mcp
 
 		private void HarvestScript(string name, int scriptId, CpuType cpu)
 		{
-			string log = DebugApi.GetScriptLog(scriptId) ?? "";
+			string log = McpNative.GetScriptLog(scriptId, McpScriptLogStore.NativeLogBytes);
 			_logStore.Harvest(scriptId, name, log, GetFrameCount(cpu));
 		}
 
@@ -929,7 +929,8 @@ namespace Mesen.Mcp
 				scripts.Add(new JsonObject() {
 					["name"] = script.Key,
 					["scriptId"] = script.Value,
-					["hasResult"] = _logStore.GetResult(script.Key) != null
+					["hasResult"] = _logStore.GetResult(script.Key) != null,
+					["pendingWriteBytes"] = Num(_logStore.PendingWriteBytes(script.Key))
 				});
 			}
 			return Json(new JsonObject() { ["scripts"] = scripts, ["nextSeq"] = _logStore.NextSeq });
@@ -948,7 +949,12 @@ namespace Mesen.Mcp
 			_scriptIds.Remove(name);
 			_scriptLogOffsets.Remove(id);
 			_logStore.ForgetScript(id);
-			return Json(new JsonObject() { ["unloaded"] = true, ["name"] = name, ["scriptId"] = id });
+			long lost = _logStore.PendingWriteBytes(name);
+			return Json(new JsonObject() {
+				["unloaded"] = true, ["name"] = name, ["scriptId"] = id,
+				["lostWriteBytes"] = lost > 0 ? Num(lost) : null,
+				["warning"] = lost > 0 ? "The script still held queued emu.mcp.writeFile data; it was lost with the script. Advance frames before unloading." : null
+			});
 		}
 
 		private McpToolResult ToolGetScriptLog(JsonElement args)

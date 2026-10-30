@@ -25,9 +25,18 @@ namespace Mesen.Mcp
 		[DllImport(EmuApi.DllName, EntryPoint = "GetScriptLog")]
 		private static extern unsafe void GetScriptLogRaw(int scriptId, byte* outScriptLog, uint maxLength);
 
+		[ThreadStatic] private static byte[]? _logBuffer;
+		[ThreadStatic] private static int _logBufferUsed;
+
 		public static unsafe string GetScriptLog(int scriptId, int bufferSize)
 		{
-			byte[] buffer = new byte[bufferSize];
+			byte[]? buffer = _logBuffer;
+			if(buffer == null || buffer.Length != bufferSize) {
+				buffer = _logBuffer = new byte[bufferSize];
+				_logBufferUsed = 0;
+			}
+			//The native copy does not write a terminator, so wipe what the previous call left behind.
+			Array.Clear(buffer, 0, Math.Min(buffer.Length, _logBufferUsed + 1));
 			fixed(byte* ptr = buffer) {
 				GetScriptLogRaw(scriptId, ptr, (uint)bufferSize);
 			}
@@ -35,6 +44,7 @@ namespace Mesen.Mcp
 			if(length < 0) {
 				length = buffer.Length;
 			}
+			_logBufferUsed = length;
 			return Encoding.UTF8.GetString(buffer, 0, length);
 		}
 	}

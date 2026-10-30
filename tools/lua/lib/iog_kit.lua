@@ -11,6 +11,8 @@
 --   quick=true  writes only sceneNext (the scene's default spawn is used; warpDest* stay untouched). The event flags
 --               in `flags` are set first, then the scene and the banner are awaited. x, y, facing, scroll are ignored.
 --               It also works from the title screen (scene $FC) once the title is polling sceneNext (delay >= ~60 frames).
+--   The result also has inputLocked ($065A != 0) and bannerShown; when the joypad is still locked after the settle wait
+--   (unlockWait extra frames, default 60) ok is false and reason/error is "input_locked".
 --   If a scene other than the default (Edward's Castle) is given without x and y, quick is used automatically.
 -- iog.state() -> table with scene/player/hp/input mask.
 iog = iog or {}
@@ -51,6 +53,7 @@ function iog.warp(opts)
     emu.log("[iog.warp] no spawn coordinates for scene " .. string.format("%02X", opts.scene) .. ": using quick warp (default spawn)")
   end
   local delay = opts.delay or 120
+  local unlockWait = opts.unlockWait or 60
   local dismiss = opts.dismissBanner
   if dismiss == nil then dismiss = true end
   local a = iog.addr
@@ -86,6 +89,7 @@ function iog.warp(opts)
       end,
       banner = function(m)
         if kit.r8(a.bannerFlag) ~= 0 then
+          m.bannerShown = true
           kit.pulse({ "a" }, 3, 3)
           m:go("dismiss")
         elseif m:elapsed() > 300 then
@@ -103,13 +107,21 @@ function iog.warp(opts)
         end
       end,
       settle = function(m)
-        if m:elapsed() >= 20 then m:go("ready") end
+        if m:elapsed() >= 20 and (kit.r16(a.inputMask) == 0 or m:elapsed() >= 20 + unlockWait) then m:go("ready") end
       end,
       ready = function(m)
         local s = iog.state()
         s.frame = kit.frame
+        s.bannerShown = m.bannerShown == true
+        s.inputLocked = s.inputMask ~= 0
         s.ok = m.failed == nil
         s.error = m.failed
+        if s.ok and s.inputLocked then
+          s.ok = false
+          s.reason = "input_locked"
+          s.error = "input_locked"
+          emu.log(string.format("[iog.warp] WARNING: joypad still locked (inputMask=%04X) after the wait", s.inputMask))
+        end
         s.quick = quick
         emu.log(string.format("[iog.warp] READY scene=%04X pos=(%04X,%04X) hp=%d/%d inputMask=%04X frame=%d",
           s.scene, s.x, s.y, s.hp, s.maxHp, s.inputMask, s.frame))

@@ -267,12 +267,26 @@ To publish: edit `mcp-version.txt`, commit, push to `master`.
 - `emu.mcp.done()`: stop the run early (`stopReason: "script_done"`). It may be called inside a callback or at script load (the run then ends at once, `framesAdvanced: 0`); `kit.finish(result)` does the same after storing the result.
 - `emu.mcp.writeFile(name, bytes, append?)`: write into the results folder; returns `nil, err` if refused.
 
-`io` and `os` are not available to scripts. The native log keeps 500 rows; the server harvests it between frame chunks into a 5000-row ring (`get_script_log`), but a script that logs more than 500 rows in one frame loses rows. `emu.createSavestate` works only inside an exec memory callback.
+`io` and `os` are not available to scripts.
+
+**Output limits (T-31).**
+- The native log keeps the last 500 rows; the server reads it (4 MB buffer, so row length does not matter) between frame chunks into a 5000-row ring (`get_script_log`). A script that logs 500 or more rows between two harvests loses the oldest rows. Prefer a few compact lines, `emu.mcp.result` (about 90 KB), or `emu.mcp.writeFile` for bulk data.
+- `emu.mcp.writeFile` has no size limit besides disk space. The script queues the data and flushes about 48 KB per frame; `run_script` keeps advancing frames after the requested count (within `timeoutMs`) until the queue is empty, so a 600 KB file written in one call arrives complete. A call that returns `true` has queued the data. If the script is unloaded, or the run stops (`timeout`, breakpoint) before the queue is empty, the rest is lost, and the reply says so.
+- The `run_script` reply reports this: `writes` = `{writeCalls, bytesQueued, bytesWritten, bytesPending, complete, warnings[]}` and `logTruncated` (true when output was lost or data is still pending). `filesWritten` lists the bytes that were actually kept. `filesWritten` entries get `truncated: true` (with the bytes kept) when a file's data was cut off or is still queued. `list_scripts` shows `pendingWriteBytes` and `unload_script` returns `lostWriteBytes` when queued data is dropped.
+
+**Memory callbacks (T-36).** These behaviors are measured on the SNES core; the server does not change them:
+- The address a callback receives is the full effective CPU address (24-bit for banked accesses, for example `0x7E0036` or `0x80C000`), not an offset. A work-RAM callback registered on `$1000-$1FBF` can therefore receive addresses above `$FFFF` (long-addressed accesses in other banks that alias WRAM). Mask with `& 0xFFFF`, or use `kit.wramOffset(addr)` to get the WRAM offset (it returns `nil` for non-WRAM addresses).
+- A direct-page access is reported at its effective address (`0x36`, `0x000036`), not as `0x7E0036`.
+- A write callback runs before the write: `emu.read` inside it returns the old value, the `value` argument is the new one. To see the value after the write, read it in an `endFrame` callback or the next exec callback.
+- The CPU `pc` you read inside a memory callback (`emu.getState()`) is already past the accessing instruction: an NMI `INC $36` reports `80:8381`, the address following the opcode and operand bytes, not the instruction's start. For the instruction address, add an exec breakpoint on the same code, use `get_disassembly` just before that PC, or log the access with `set_breakpoints` (`action: "log"`), whose hits carry `pc`, `pcHex` and `pcPrgOffset`.
+- A callback on a bus type (`snesMemory`) for `$7F0000-$7F00FF` got no hits in 78 idle frames; this is not understood yet. Use the `snesWorkRam` callback type (WRAM offsets `$10000-$100FF`) for `$7F` work RAM.
+
+`emu.createSavestate` works only inside an exec memory callback.
 
 `includes: ["mesen_kit", "iog_kit"]` loads modules from the lib folder:
 
 - `mesen_kit`: `kit.r8/r16/w8/w16`, `kit.setBit/getBit`, `kit.frame`, `kit.onFrame`, `kit.machine`, `kit.pulse/stopPulse`, `kit.topCounts`, `kit.wramOffset(addr)`, `kit.finish(result)`.
-- `iog_kit` (Illusion of Gaia): `iog.warp{scene, x, y, facing, scroll, flags, quick, ...}` (`quick = true` writes only `sceneNext`, keeps the scene's default spawn and ignores x/y; a scene other than the default without x/y uses it automatically; it also works from the title screen after about 450 frames), `iog.setEventFlag/getEventFlag`, `iog.state()`.
+- `iog_kit` (Illusion of Gaia): `iog.warp{scene, x, y, facing, scroll, flags, quick, ...}` (`quick = true` writes only `sceneNext`, keeps the scene's default spawn and ignores x/y; a scene other than the default without x/y uses it automatically; it also works from the title screen after about 450 frames; the result has `inputLocked` (`$065A != 0`) and `bannerShown`, waits up to `unlockWait` extra frames (default 60) for the joypad, and returns `ok: false, reason: "input_locked"` if it is still locked), `iog.setEventFlag/getEventFlag`, `iog.state()`.
 
 `list_recipes` and `run_recipe {name, args?, frames?}` run ready-made scripts from every lib folder: `warp`, `census_pc`, `exec_coverage` plus your own. In a recipe the Lua table `args` holds the arguments. `run_until` takes `includes` as a top-level argument too.
 
@@ -991,7 +1005,7 @@ Load and execute a Lua script. Returns a stable scriptId and any log rows produc
 
 #### `run_script`
 
-Atomic experiment: pause, load a script (with optional kit includes), advance frames, collect log and result, unload the script. Stops early when the script calls emu.mcp.done(). Returns stopReason (done|script_done|breakpoint|timeout), framesAdvanced, the log rows, the emu.mcp.result value and any files written with emu.mcp.writeFile.
+Atomic experiment: pause, load a script (with optional kit includes), advance frames, collect log and result, unload the script. Stops early when the script calls emu.mcp.done(). Returns stopReason (done|script_done|breakpoint|timeout), framesAdvanced, the log rows, the emu.mcp.result value, any files written with emu.mcp.writeFile (filesWritten) and a writes report (bytesQueued/bytesWritten/complete/warnings) plus logTruncated when output was lost. Large writeFile data is flushed a few KB per frame and the run continues until it has all arrived (within timeoutMs).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

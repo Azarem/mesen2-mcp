@@ -122,7 +122,7 @@ namespace Mesen.Mcp
 
 			AddTool(tools, "run_script",
 				"Atomic experiment: pause, load a script (with optional kit includes), advance frames, collect log and result, unload the script. " +
-				"Stops early when the script calls emu.mcp.done(). Returns stopReason (done|script_done|breakpoint|timeout), framesAdvanced, the log rows, the emu.mcp.result value and any files written with emu.mcp.writeFile.",
+				"Stops early when the script calls emu.mcp.done(). Returns stopReason (done|script_done|breakpoint|timeout), framesAdvanced, the log rows, the emu.mcp.result value, any files written with emu.mcp.writeFile (filesWritten) and a writes report (bytesQueued/bytesWritten/complete/warnings) plus logTruncated when output was lost. Large writeFile data is flushed a few KB per frame and the run continues until it has all arrived (within timeoutMs).",
 				ObjectSchema(
 					("code", StringSchema("Lua source code"), true),
 					("name", StringSchema("Script name (default run_script)"), false),
@@ -400,6 +400,88 @@ namespace Mesen.Mcp
 				stream.Write(bytes, 0, bytes.Length);
 			}
 			_filesWritten[name] = new FileInfo(full).Length;
+			_logStore.NoteWriteReceived(script, bytes.Length);
+		}
+
+		/// <summary>
+		/// A script flushes emu.mcp.writeFile data a few KB per frame (the native log keeps the last 500 rows between harvests).
+		/// After the requested frames, keep running until everything has arrived, within the time budget.
+		/// </summary>
+		private void DrainScriptWrites(string name, int scriptId, CpuType cpu, StepOutcome outcome, int budgetMs)
+		{
+			Stopwatch watch = Stopwatch.StartNew();
+			int rounds = 0;
+			while(_logStore.PendingWriteBytes(name) > 0 && watch.ElapsedMilliseconds < budgetMs && rounds++ < 200000) {
+				StepOutcome part = RunFrames(cpu, 5, Math.Max(1000, budgetMs - (int)watch.ElapsedMilliseconds));
+				HarvestScript(name, scriptId, cpu);
+				outcome.FramesAdvanced += part.FramesAdvanced;
+				outcome.ElapsedMs += part.ElapsedMs;
+				if(part.StopReason != "done") {
+					outcome.StopReason = part.StopReason;
+					break;
+				}
+			}
+		}
+
+		/// <summary>The writeFile accounting and overflow warnings of one script, for the run_script reply.</summary>
+		private JsonObject? BuildWriteReport(string name)
+		{
+			McpScriptLogStore.WriteState state = _logStore.GetWriteState(name);
+			if(state.Calls == 0 && state.PendingRowBytes == 0 && !state.LogFull && !state.RowsDropped && state.CutRows == 0) {
+				return null;
+			}
+			JsonArray warnings = new JsonArray();
+			if(state.CutRows > 0) {
+				warnings.Add(JsonValue.Create($"{state.CutRows} writeFile row(s) were cut off by a full native log buffer; the affected files are incomplete."));
+			}
+			if(state.PendingRowBytes > 0) {
+				warnings.Add(JsonValue.Create($"{state.PendingRowBytes} bytes of writeFile data were still queued in the script when the run ended (they flush a few KB per frame): run more frames, or raise timeoutMs."));
+			} else if(state.MissingBytes > 0) {
+				warnings.Add(JsonValue.Create($"{state.MissingBytes} bytes passed to emu.mcp.writeFile never arrived (native log overflow)."));
+			}
+			if(state.LogFull) {
+				warnings.Add(JsonValue.Create("The native script log buffer (4 MB) was full at a harvest, so log rows may be missing. Log less per frame (compact lines)."));
+			}
+			if(state.RowsDropped) {
+				warnings.Add(JsonValue.Create("The script logged 500 or more rows between two harvests (the native log keeps only the last 500 rows), so the oldest rows were dropped. Log fewer, longer lines, or use emu.mcp.result / emu.mcp.writeFile for bulk data."));
+			}
+			return new JsonObject() {
+				["writeCalls"] = Num(state.Calls),
+				["bytesQueued"] = Num(state.QueuedBytes),
+				["bytesWritten"] = Num(state.ReceivedBytes),
+				["bytesPending"] = Num(state.PendingRowBytes),
+				["complete"] = !state.Truncated && state.PendingRowBytes == 0 && state.MissingBytes == 0,
+				["warnings"] = warnings
+			};
+		}
+
+		/// <summary>Flags the files of a script whose data was cut off or is still queued (MCP-43): truncated=true, with the bytes kept.</summary>
+		private void MarkTruncatedFiles(JsonArray files, string script)
+		{
+			McpScriptLogStore.WriteState state = _logStore.GetWriteState(script);
+			HashSet<string> flagged = new HashSet<string>(state.CutFiles, StringComparer.OrdinalIgnoreCase);
+			if(state.PendingRowBytes > 0) {
+				flagged.UnionWith(state.PendingFiles);
+			}
+			foreach(string file in flagged) {
+				JsonObject? entry = files.OfType<JsonObject>().FirstOrDefault(f => string.Equals(f["name"]?.GetValue<string>(), file, StringComparison.OrdinalIgnoreCase));
+				if(entry == null) {
+					string full;
+					try {
+						full = ResolveResultPath(file);
+					} catch(Exception) {
+						continue;
+					}
+					entry = new JsonObject() {
+						["name"] = file,
+						["path"] = full,
+						["bytes"] = Num(File.Exists(full) ? new FileInfo(full).Length : 0),
+						["sha1"] = File.Exists(full) ? McpRomIdentity.Sha1OfFile(full) : null
+					};
+					files.Add((JsonNode)entry);
+				}
+				entry["truncated"] = true;
+			}
 		}
 
 		private JsonArray BuildFilesWritten(Dictionary<string, long> before)
@@ -742,6 +824,12 @@ namespace Mesen.Mcp
 				outcome.StopReason = "script_done";
 			}
 			HarvestScript(name, id, cpu);
+			if(_logStore.PendingWriteBytes(name) > 0) {
+				using(BeginTurbo(true)) {
+					DrainScriptWrites(name, id, cpu, outcome, Math.Min(Math.Max(timeoutMs, 10000), 120000));
+				}
+				HarvestScript(name, id, cpu);
+			}
 
 			McpScriptLogQuery log = _logStore.Query(name, startSeq, maxLog);
 			string? rawResult = _logStore.GetResult(name);
@@ -761,9 +849,16 @@ namespace Mesen.Mcp
 			node["hasResult"] = rawResult != null;
 			node["result"] = ParseResult(rawResult);
 			JsonArray files = BuildFilesWritten(filesBefore);
+			MarkTruncatedFiles(files, name);
 			if(files.Count > 0) {
 				node["filesWritten"] = files;
 			}
+			JsonObject? writes = BuildWriteReport(name);
+			if(writes != null) {
+				node["writes"] = writes;
+			}
+			McpScriptLogStore.WriteState writeState = _logStore.GetWriteState(name);
+			node["logTruncated"] = writeState.Truncated || writeState.PendingRowBytes > 0;
 			return node;
 		}
 

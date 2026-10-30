@@ -128,6 +128,7 @@ def main():
         c.call("clear_breakpoints")
 
         # ---- MCP-14 access summary -----------------------------------------------------------------
+        c.call("reset_cdl")  # a CDL saved by an earlier run is auto-loaded with the ROM
         err, r = call_json(c, "reset_access_counters")
         check("reset_access_counters", not err, str(r)[:150])
         err, af = call_json(c, "advance_frame", frames=60, turbo=True)

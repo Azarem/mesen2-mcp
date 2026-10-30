@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace Mesen.Mcp
@@ -33,8 +34,9 @@ namespace Mesen.Mcp
 		public const string ResultPrefix = "@@MCP_RESULT@@";
 		public const string WritePrefix = "@@MCP_WRITE@@";
 		public const string DonePrefix = "@@MCP_DONE@@";
+		public const string WriteQueuePrefix = "@@MCP_WQ@@";
 		/// <summary>Size of the buffer the interop layer reads the native script log into.</summary>
-		public const int NativeLogBytes = 100000;
+		public const int NativeLogBytes = 4 * 1024 * 1024;
 
 		/// <summary>What one harvest found: how much new output, as a share of the native log capacity.</summary>
 		public readonly struct HarvestStats
@@ -50,7 +52,7 @@ namespace Mesen.Mcp
 				NearlyFull = nearlyFull;
 			}
 
-			/// <summary>0..1+: how much of the native log (500 rows / 100000 bytes) one harvest consumed.</summary>
+			/// <summary>0..1+: how much of the native log (500 rows) one harvest consumed.</summary>
 			public double Fill => Math.Max(NewRows / (double)NativeLogRows, NewBytes / (double)NativeLogBytes);
 		}
 		public const int NativeLogRows = 500;
@@ -99,18 +101,61 @@ end
 emu.mcp = emu.mcp or {}
 emu.mcp.result = function(v) emu.log('@@MCP_RESULT@@' .. enc(v, 0)) end
 emu.mcp.done = function() emu.log('@@MCP_DONE@@') pcall(emu.breakExecution) end
+local WQ, WH, WP, FB, SF, WCALLS, WTOTAL, WREF = {}, 1, 0, 0, false, 0, 0, nil
+local WNQ, WNC = {}, {}
+local WBUDGET, WPIECE = 48000, 4000
+local function wstatus()
+  SF = true
+  local names, n = {}, 0
+  for k in pairs(WNC) do
+    if n < 20 then n = n + 1 names[n] = q(k) end
+  end
+  emu.log('@@MCP_WQ@@{"p":' .. WP .. ',"calls":' .. WCALLS .. ',"bytes":' .. WTOTAL .. ',"f":[' .. table.concat(names, ',') .. ']}')
+end
+local function wdrain()
+  while WH <= #WQ and (FB == 0 or FB + #WQ[WH] <= WBUDGET) do
+    local row = WQ[WH]
+    local rn = WNQ[WH]
+    WQ[WH] = false
+    WH = WH + 1
+    WNC[rn] = WNC[rn] - 1
+    if WNC[rn] <= 0 then WNC[rn] = nil end
+    WP = WP - #row
+    FB = FB + #row
+    emu.log(row)
+  end
+  if WH > #WQ then WQ, WNQ, WH, WP = {}, {}, 1, 0 end
+end
+local function wframe()
+  FB, SF = 0, false
+  if WP > 0 then
+    wdrain()
+    wstatus()
+  end
+end
 emu.mcp.writeFile = function(name, text, append)
   if type(name) ~= 'string' or name == '' then return nil, 'name must be a non-empty string' end
   if name:find('..', 1, true) or name:find('^[/\\]') or name:find('^%a:') or name:find('[%c<>|"?*]') then
     return nil, 'invalid file name: ' .. name
   end
   text = (text == nil) and '' or tostring(text)
+  if not WREF then
+    local ok, ref = pcall(emu.addEventCallback, wframe, emu.eventType.endFrame)
+    if ok then WREF = ref end
+  end
   local pos, first = 1, true
   repeat
-    local piece = text:sub(pos, pos + 8191)
-    emu.log('@@MCP_WRITE@@' .. '{"name":' .. q(name) .. ',"append":' .. tostring((append and true or not first) and true or false) .. ',"text":' .. q(piece, true) .. '}')
-    first, pos = false, pos + 8192
+    local piece = text:sub(pos, pos + WPIECE - 1)
+    local row = '@@MCP_WRITE@@' .. '{"name":' .. q(name) .. ',"append":' .. tostring((append and true or not first) and true or false) .. ',"text":' .. q(piece, true) .. '}'
+    WQ[#WQ + 1] = row
+    WNQ[#WQ] = name
+    WNC[name] = (WNC[name] or 0) + 1
+    WP = WP + #row
+    first, pos = false, pos + WPIECE
   until pos > #text
+  WCALLS, WTOTAL = WCALLS + 1, WTOTAL + #text
+  wdrain()
+  if WP > 0 and not SF then wstatus() end
   return true
 end
 end)
@@ -125,6 +170,42 @@ end)
 		private readonly Dictionary<int, List<string>> _snapshots = new Dictionary<int, List<string>>();
 		private readonly Dictionary<string, string> _results = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 		private readonly HashSet<string> _done = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+		/// <summary>Per-script accounting of emu.mcp.writeFile and of log overflow, reported in the run_script reply.</summary>
+		public sealed class WriteState
+		{
+			/// <summary>Bytes of write rows the script still holds back (it flushes a few KB per frame).</summary>
+			public long PendingRowBytes;
+			/// <summary>Number of writeFile calls and bytes passed to them, as last reported by the script.</summary>
+			public long Calls, QueuedBytes;
+			/// <summary>File bytes that arrived at the server.</summary>
+			public long ReceivedBytes;
+			/// <summary>A write row could not be parsed (cut off by a full native log).</summary>
+			public int CutRows;
+			/// <summary>The native log was (nearly) full at a harvest, or more than 500 rows arrived in one window.</summary>
+			public bool LogFull, RowsDropped;
+			/// <summary>Files whose data is still queued in the script, and files that lost a row to a cut-off log.</summary>
+			public HashSet<string> PendingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+			public HashSet<string> CutFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+			public long MissingBytes => Math.Max(0, QueuedBytes - ReceivedBytes);
+			public bool Truncated => CutRows > 0 || (PendingRowBytes == 0 && MissingBytes > 0) || LogFull || RowsDropped;
+		}
+
+		private readonly Dictionary<string, WriteState> _writes = new Dictionary<string, WriteState>(StringComparer.OrdinalIgnoreCase);
+
+		public WriteState GetWriteState(string name)
+		{
+			if(!_writes.TryGetValue(name, out WriteState? state)) {
+				state = new WriteState();
+				_writes[name] = state;
+			}
+			return state;
+		}
+
+		public long PendingWriteBytes(string name) => _writes.TryGetValue(name, out WriteState? s) ? s.PendingRowBytes : 0;
+
+		public void NoteWriteReceived(string name, long bytes) => GetWriteState(name).ReceivedBytes += bytes;
 
 		/// <summary>Called for every emu.mcp.writeFile row with (scriptName, json). Set by the tool service.</summary>
 		public Action<string, string>? OnWriteRow { get; set; }
@@ -148,6 +229,7 @@ end)
 			_snapshots[scriptId] = new List<string>();
 			_results.Remove(name);
 			_done.Remove(name);
+			_writes.Remove(name);
 		}
 
 		public void ForgetScript(int scriptId)
@@ -191,9 +273,18 @@ end)
 					_results[scriptName] = row.Substring(ResultPrefix.Length);
 				} else if(row.StartsWith(DonePrefix, StringComparison.Ordinal)) {
 					_done.Add(scriptName);
+				} else if(row.StartsWith(WriteQueuePrefix, StringComparison.Ordinal)) {
+					ParseWriteQueueRow(scriptName, row.Substring(WriteQueuePrefix.Length));
 				} else if(row.StartsWith(WritePrefix, StringComparison.Ordinal)) {
 					try {
 						OnWriteRow?.Invoke(scriptName, row.Substring(WritePrefix.Length));
+					} catch(JsonException) {
+						GetWriteState(scriptName).CutRows++;
+						System.Text.RegularExpressions.Match nameMatch = System.Text.RegularExpressions.Regex.Match(row, @"^@@MCP_WRITE@@\{""name"":""((?:[^""\\]|\\.)*)""");
+						if(nameMatch.Success) {
+							GetWriteState(scriptName).CutFiles.Add(nameMatch.Groups[1].Value.Replace("\\\\", "\\").Replace("\\\"", "\""));
+						}
+						Append(scriptName, frame, "[mcp] a writeFile row was cut off because the native script log buffer (4 MB) was full; part of that file is missing.");
 					} catch(Exception ex) {
 						Append(scriptName, frame, "[mcp] writeFile failed: " + ex.Message);
 					}
@@ -202,12 +293,36 @@ end)
 				}
 			}
 
-			bool nearlyFull = nativeLog.Length >= NativeLogBytes - 1000;
+			bool nearlyFull = nativeLog.Length >= NativeLogBytes - 8000;
 			if(nearlyFull) {
-				Append(scriptName, frame, "[mcp] warning: the native script log buffer (100000 bytes) is full; output may have been cut off. Log less per frame, or use emu.mcp.result / emu.mcp.writeFile in smaller pieces.");
+				GetWriteState(scriptName).LogFull = true;
+			}
+			if(current.Count >= NativeLogRows && (firstNew == 0 || previous.Count == 0)) {
+				GetWriteState(scriptName).RowsDropped = true;
+			}
+			if(nearlyFull) {
+				Append(scriptName, frame, "[mcp] warning: the native script log buffer (4 MB) is full; output may have been cut off. Log less per frame.");
 			}
 			_snapshots[scriptId] = current;
 			return new HarvestStats(current.Count - firstNew, newBytes, nearlyFull);
+		}
+
+		private void ParseWriteQueueRow(string scriptName, string json)
+		{
+			try {
+				using JsonDocument doc = JsonDocument.Parse(json);
+				WriteState state = GetWriteState(scriptName);
+				state.PendingRowBytes = doc.RootElement.GetProperty("p").GetInt64();
+				state.Calls = doc.RootElement.GetProperty("calls").GetInt64();
+				state.QueuedBytes = doc.RootElement.GetProperty("bytes").GetInt64();
+				state.PendingFiles.Clear();
+				if(doc.RootElement.TryGetProperty("f", out JsonElement files) && files.ValueKind == JsonValueKind.Array) {
+					foreach(JsonElement file in files.EnumerateArray()) {
+						state.PendingFiles.Add(file.GetString() ?? "");
+					}
+				}
+			} catch(JsonException) {
+			}
 		}
 
 		public McpScriptLogQuery Query(string? scriptName, long sinceSeq, int max)

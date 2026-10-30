@@ -8,6 +8,8 @@
 --   kit.pulse(buttons, framesDown, framesUp)   toggles buttons from an inputPolled callback until kit.stopPulse()
 --   kit.finish(result)            emu.mcp.result(result) + emu.mcp.done() (also allowed at script load: the run ends at once)
 --   kit.wramOffset(addr)          SNES: WRAM offset of the CPU address a callback received ($7E/$7F banks, $0000-$1FFF of banks $00-$3F/$80-$BF), or nil
+--                                 Memory callbacks get the FULL effective address (24-bit when banked), run BEFORE a write (emu.read still returns
+--                                 the old value) and see a PC that is already past the accessing instruction. Mask with & 0xFFFF or use this helper.
 kit = kit or {}
 
 local function defaultMem()

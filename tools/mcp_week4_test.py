@@ -91,6 +91,38 @@ def main():
         err, rs = call_json(c, "run_script", code="emu.mcp.done() emu.mcp.result({after = true})", frames=100)
         check("code after done() at load still runs", not err and rs.get("result", {}).get("after") is True, str(rs)[:300])
 
+        # ---- T-31 large writeFile output and truncation reports -----------------------------------
+        code = ('local line = string.rep("0123456789abcdef", 64) .. "\\n" '
+                'emu.mcp.writeFile("big/a.txt", string.rep(line, 60)) '
+                'emu.mcp.writeFile("big/b.txt", string.rep(line, 150)) '
+                'emu.mcp.writeFile("big/c.txt", string.rep(line, 600)) '
+                'local bin = {} for i = 0, 255 do bin[#bin + 1] = string.char(i) end '
+                'emu.mcp.writeFile("big/d.bin", string.rep(table.concat(bin), 100)) '
+                'emu.mcp.done()')
+        err, big = call_json(c, "run_script", code=code, frames=1, timeoutMs=60000)
+        files = {f["name"]: f["bytes"] for f in big.get("filesWritten", [])}
+        sizes_ok = files == {"big/a.txt": 1025 * 60, "big/b.txt": 1025 * 150, "big/c.txt": 1025 * 600, "big/d.bin": 25600}
+        check("run_script writes 60 KB, 150 KB, 600 KB and binary files completely", not err and sizes_ok, f"{files} {str(big.get('writes'))[:200]}")
+        wr = big.get("writes", {})
+        check("write report is complete", wr.get("complete") is True and wr.get("bytesQueued") == wr.get("bytesWritten") and big.get("logTruncated") is False, str(wr)[:300])
+        with open(os.path.join(results_dir, "big", "d.bin"), "rb") as fh:
+            data = fh.read()
+        check("binary file content is exact", data == bytes(range(256)) * 100)
+        with open(os.path.join(results_dir, "big", "b.txt"), "rb") as fh:
+            data = fh.read()
+        check("text file content is exact", data == (b"0123456789abcdef" * 64 + b"\n") * 150)
+        err, big = call_json(c, "run_script", code=('for i = 1, 700 do emu.log("row " .. i) end emu.mcp.result({n = 1})'), frames=1)
+        check("overflowing the native log is reported", not err and big.get("logTruncated") is True and any("500 or more rows" in w for w in big.get("writes", {}).get("warnings", [])) , str(big.get("writes"))[:300])
+
+        # ---- MCP-43 data still queued is reported -------------------------------------------------
+        call_json(c, "load_script", name="slowwrite", code='emu.mcp.writeFile("big/slow.txt", string.rep("x", 2000000))')
+        call_json(c, "advance_frame", frames=3)
+        err, ls = call_json(c, "list_scripts")
+        pend = next((x.get("pendingWriteBytes", 0) for x in ls.get("scripts", []) if x.get("name") == "slowwrite"), 0)
+        check("list_scripts shows pendingWriteBytes", pend > 0, str(ls)[:300])
+        err, ul = call_json(c, "unload_script", name="slowwrite")
+        check("unload_script reports lost write bytes", ul.get("lostWriteBytes", 0) > 0 and "warning" in ul, str(ul)[:300])
+
         # ---- MCP-24 JSON memory tools --------------------------------------------------------------
         err, w = call_json(c, "write_memory", address=0x7E1F20, data=[0x34, 0x12])
         check("write_memory returns JSON", not err and w.get("written") == 2 and w.get("value") == 0x1234 and w.get("hex") == "0x1234" and w.get("verified") is True, str(w))
@@ -125,7 +157,7 @@ def main():
 
         # ---- MCP-25 breakpoint hit offsets ---------------------------------------------------------
         err, r = call_json(c, "set_breakpoints", breakpoints=[
-            {"callbackType": "exec", "startAddress": 0x8000, "endAddress": 0xFFFF, "action": "log", "memType": "snesMemory", "name": "alias", "maxLogged": 5},
+            {"callbackType": "exec", "startAddress": 0x0, "endAddress": 0xFFFFFF, "action": "log", "memType": "snesMemory", "name": "alias", "maxLogged": 5},
             {"callbackType": "write", "startAddress": 0x0000, "endAddress": 0x1FFF, "action": "log", "memType": "snesWorkRam", "name": "wram", "maxLogged": 5}])
         check("set_breakpoints log", not err, str(r)[:200])
         call_json(c, "advance_frame", frames=30, turbo=True)
@@ -188,9 +220,12 @@ def main():
         err, wp = call_json(c, "run_recipe", name="warp", args={"scene": 0x15, "delay": 450}, frames=1500, timeoutMs=60000)
         wres = wp.get("result", {})
         check("warp without x/y uses the quick warp", not err and wres.get("scene") == 0x15 and wres.get("quick") is True and wres.get("ok") is True, str(wres))
-        err, wq = call_json(c, "run_recipe", name="warp", args={"scene": 0x08, "quick": True, "delay": 100, "flags": [0x3F]}, frames=1500, timeoutMs=60000)
+        err, wq = call_json(c, "run_recipe", name="warp", args={"scene": 0x08, "quick": True, "delay": 100, "flags": [0x3F], "unlockWait": 0}, frames=1500, timeoutMs=60000)
         wres = wq.get("result", {})
         check("warp quick=true reaches the scene", not err and wres.get("scene") == 0x08 and wres.get("quick") is True, str(wres))
+
+        # ---- MCP-42 warp reports a locked joypad (scene $08 without waiting for the unlock) --------
+        check("warp reports input_locked when the joypad is locked", wres.get("inputLocked") is True and wres.get("ok") is False and wres.get("reason") == "input_locked" and "bannerShown" in wres, str(wres))
 
         # ---- MCP-27 watchdog -----------------------------------------------------------------------
         t_start = time.time()
