@@ -68,15 +68,38 @@ jobs:
           fi
 
       # ---- native emulation core (MesenCore) ------------------------------------------------
-      - name: Set up MSBuild
+      # MSBuild is located with vswhere instead of relying on PATH (the bash shell did not see the
+      # directory that microsoft/setup-msbuild adds). A Visual Studio with the C++ tools is required.
+      - name: Locate MSBuild (Windows)
         if: runner.os == 'Windows'
-        uses: microsoft/setup-msbuild@v2
-        with:
-          msbuild-architecture: x64
+        id: msbuild
+        run: |
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          echo "Visual Studio instances:"
+          "$vswhere" -all -products '*' -property displayName -property installationVersion
+          msbuild=$("$vswhere" -latest -products '*' \
+            -requires Microsoft.Component.MSBuild \
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
+            -find 'MSBuild\**\Bin\amd64\MSBuild.exe' | head -n 1 | tr -d '\r')
+          if [ -z "$msbuild" ]; then
+            msbuild=$("$vswhere" -latest -products '*' \
+              -requires Microsoft.Component.MSBuild \
+              -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
+              -find 'MSBuild\**\Bin\MSBuild.exe' | head -n 1 | tr -d '\r')
+          fi
+          if [ -z "$msbuild" ]; then
+            echo "::error::No Visual Studio with MSBuild and the C++ x64 tools was found on this runner"
+            exit 1
+          fi
+          echo "MSBuild: $msbuild"
+          echo "path=$msbuild" >> "$GITHUB_OUTPUT"
 
       - name: Build native core (Windows)
         if: runner.os == 'Windows'
-        run: msbuild Mesen.sln -nologo -m -p:Configuration=Release -p:Platform=x64 -t:InteropDLL
+        env:
+          MSBUILD: ${{ steps.msbuild.outputs.path }}
+        run: |
+          "$MSBUILD" Mesen.sln -nologo -m -p:Configuration=Release -p:Platform=x64 -t:InteropDLL
 
       - name: Build native core (Linux)
         if: runner.os == 'Linux'
