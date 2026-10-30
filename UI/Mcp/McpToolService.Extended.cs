@@ -29,7 +29,7 @@ namespace Mesen.Mcp
 	/// </summary>
 	internal sealed partial class McpToolService
 	{
-		/// <summary>The version of the host (the VERSION file at the repo root, through McpHost.csproj).</summary>
+		/// <summary>The version of the host (the mcp-version.txt file at the repo root, through McpHost.csproj).</summary>
 		internal static readonly string ServerVersion = ReadServerVersion();
 
 		private static string ReadServerVersion()

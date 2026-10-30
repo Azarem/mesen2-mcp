@@ -112,15 +112,15 @@ def main():
         if "capabilities" not in init_result:
             raise RuntimeError("initialize response is missing capabilities")
 
-        # The host version comes from the VERSION file at the repo root; a release must report it.
-        version_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")
+        # The host version comes from the mcp-version.txt file at the repo root; a release must report it.
+        version_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mcp-version.txt")
         if os.path.isfile(version_file):
             with open(version_file, encoding="utf-8") as f:
                 expected_version = f.read().strip()
             reported_version = (init_result.get("serverInfo") or {}).get("version")
             if reported_version != expected_version:
                 raise RuntimeError(
-                    f"serverInfo.version is {reported_version!r}, expected {expected_version!r} (VERSION file)")
+                    f"serverInfo.version is {reported_version!r}, expected {expected_version!r} (mcp-version.txt)")
 
         send_message(
             proc.stdin,

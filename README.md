@@ -217,13 +217,13 @@ On Windows run steps 2 and 3 in PowerShell (the commands work as written; Git Ba
 
 ## Releasing (maintainers)
 
-The version lives in one place, the `VERSION` file at the repo root (it becomes the host's assembly version and the `serverVersion` the tools report). The workflow `.github/workflows/build.yml`:
+The version lives in one place, the `mcp-version.txt` file at the repo root (it becomes the host's assembly version and the `serverVersion` the tools report). The workflow `.github/workflows/build.yml`:
 
 1. builds the native core and the .NET host on Windows x64, Linux x64/arm64 and macOS x64/arm64 for every push to `master` and every pull request,
-2. verifies the published folder (`tools/verify_release.py`) and smoke-tests the server over stdio, including that it reports the `VERSION` it was built from (`tools/mcp_smoke_test.py`),
-3. on a push to `master`, when `VERSION` has no release yet, creates the tag `v<VERSION>` and a GitHub release with one zip per platform (`mesen2-mcp-<rid>.zip`) and `SHA256SUMS.txt`.
+2. verifies the published folder (`tools/verify_release.py`) and smoke-tests the server over stdio, including that it reports the version in `mcp-version.txt` it was built from (`tools/mcp_smoke_test.py`),
+3. on a push to `master`, when `mcp-version.txt` has no release yet, creates the tag `v<version>` and a GitHub release with one zip per platform (`mesen2-mcp-<rid>.zip`) and `SHA256SUMS.txt`.
 
-To publish: edit `VERSION`, commit, push to `master`.
+To publish: edit `mcp-version.txt`, commit, push to `master`.
 
 ## Startup flags
 

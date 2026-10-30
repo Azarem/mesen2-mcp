@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>MesenMcpHost</AssemblyName>
     <RootNamespace>MesenMcpHost</RootNamespace>
-    <!-- One place for the version: the VERSION file at the repo root. Bump it to publish a release. -->
-    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\VERSION').Trim())</Version>
+    <!-- One place for the version: the mcp-version.txt file at the repo root (not named VERSION: on case-insensitive file systems the C++ standard header <version> would resolve to it). Bump it to publish a release. -->
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\mcp-version.txt').Trim())</Version>
   </PropertyGroup>
 
   <ItemGroup>

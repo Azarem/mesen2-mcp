@@ -4,8 +4,8 @@ name: Build MCP server
 #
 #  * Every push to master and every pull request builds, verifies and smoke-tests the server on
 #    Windows x64, Linux x64/arm64 and macOS x64/arm64.
-#  * A release is published only when the VERSION file holds a version that has no tag yet:
-#    bump VERSION (for example 0.4.0 -> 0.5.0), push to master, and v0.5.0 is released.
+#  * A release is published only when the mcp-version.txt file holds a version that has no tag yet:
+#    bump mcp-version.txt (for example 0.4.0 -> 0.5.0), push to master, and v0.5.0 is released.
 #
 # The only native code is the C++ emulation core (MesenCore). It is compiled here and shipped in
 # the zip next to the managed host, so the release needs nothing but the .NET 8 runtime (plus SDL2
@@ -58,12 +58,12 @@ jobs:
         with:
           python-version: 3.x
 
-      - name: Check VERSION
+      - name: Check mcp-version.txt
         run: |
-          version=$(tr -d '[:space:]' < VERSION)
-          echo "VERSION = $version"
+          version=$(tr -d '[:space:]' < mcp-version.txt)
+          echo "mcp-version.txt = $version"
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error file=VERSION::VERSION must look like 1.2.3 (got '$version')"
+            echo "::error file=mcp-version.txt::mcp-version.txt must look like 1.2.3 (got '$version')"
             exit 1
           fi
 
@@ -156,7 +156,7 @@ jobs:
           path: mesen2-mcp-${{ matrix.rid }}.zip
           if-no-files-found: error
 
-  # Publishes a GitHub release when VERSION has no tag yet.
+  # Publishes a GitHub release when mcp-version.txt has no tag yet.
   release:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
@@ -174,7 +174,7 @@ jobs:
       - name: Check whether this version is new
         id: version
         run: |
-          version=$(tr -d '[:space:]' < VERSION)
+          version=$(tr -d '[:space:]' < mcp-version.txt)
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           if gh release view "v$version" > /dev/null 2>&1; then
             echo "new=false" >> "$GITHUB_OUTPUT"
