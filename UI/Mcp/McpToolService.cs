@@ -69,6 +69,11 @@ namespace Mesen.Mcp
 			ExitCode = exitCode;
 		}
 
+		/// <summary>Tools that work before any ROM is loaded.</summary>
+		private static readonly HashSet<string> NoRomTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+			"load_rom", "stop", "get_capabilities", "list_recipes"
+		};
+
 		public JsonArray ListTools()
 		{
 			JsonArray tools = new JsonArray();
@@ -82,7 +87,7 @@ namespace Mesen.Mcp
 			return tools;
 		}
 
-		public McpToolResult CallTool(string name, JsonElement args)
+		private McpToolResult CallToolCore(string name, JsonElement args)
 		{
 			if(!_tools.TryGetValue(name, out McpToolDefinition? tool)) {
 				return McpToolResult.Text($"Unknown tool: {name}", true);
@@ -98,14 +103,12 @@ namespace Mesen.Mcp
 
 			_toolLock.Wait();
 			try {
-				if(!name.Equals("load_rom", StringComparison.OrdinalIgnoreCase) &&
-					!name.Equals("stop", StringComparison.OrdinalIgnoreCase) &&
-					!EmuApi.IsRunning()) {
+				bool worksWithoutRom = NoRomTools.Contains(name);
+				if(!worksWithoutRom && !EmuApi.IsRunning()) {
 					return McpToolResult.Text("No ROM is running. Call load_rom first.", true);
 				}
 
-				if(!name.Equals("load_rom", StringComparison.OrdinalIgnoreCase) &&
-					!name.Equals("stop", StringComparison.OrdinalIgnoreCase)) {
+				if(!worksWithoutRom && EmuApi.IsRunning()) {
 					EnsureDebuggerInitialized();
 				}
 
@@ -183,23 +186,32 @@ namespace Mesen.Mcp
 			});
 			AddTool(tools, "stop", "Stop emulation and exit MCP server.", ObjectSchema(("exitCode", IntegerSchema("Exit code"), false)), ToolStop);
 			AddTool(tools, "get_timing_info", "Get frame, scanline and cycle timing info.", EmptySchema(), ToolGetTimingInfo);
-			AddTool(tools, "rewind", "Rewind emulation by seconds.", ObjectSchema(("seconds", IntegerSchema("Seconds to rewind"), true)), ToolRewind);
+			AddTool(tools, "rewind",
+				"Rewind emulation by an exact amount of time using the emulator's rewind history (needs the rewind buffer enabled in the preferences and at least ~2 s of history). " +
+				"The rewind history has a granularity of 30 frames, so the server jumps back in whole steps and then plays forward the surplus: the result lands exactly seconds*fps frames earlier. " +
+				"Returns {framesRewound, frameBefore, frameAfter, requestedFrames, jumps, forwardFrames}. Refuses with rewind_unavailable (rewindAvailableFrames) when there is no history, and with rewind_insufficient_history " +
+				"(state restored) when more was requested than the history holds, unless allowPartial is true. The emulator is left in normal (not rewinding) mode with callbacks intact.",
+				ObjectSchema(
+					("seconds", IntegerSchema("Seconds to rewind (use frames for sub-second precision)"), false),
+					("frames", IntegerSchema("Frames to rewind (alternative to seconds)"), false),
+					("allowPartial", BooleanSchema("Rewind as far as the history reaches when it is shorter than requested (default false)"), false)
+				), ToolRewind);
 
 			AddTool(tools, "read_memory", "Read bytes from memory.", ObjectSchema(
 				("address", IntegerSchema("Start address"), true),
 				("length", IntegerSchema("Byte length"), true),
 				("type", StringSchema("Memory type"), false)
 			), ToolReadMemory);
-			AddTool(tools, "write_memory", "Write bytes to memory.", ObjectSchema(
+			AddTool(tools, "write_memory", "Write bytes to memory. Returns {memoryType, address, written, bytes, verified, value, hex} (value/hex only for up to 4 bytes, little-endian).", ObjectSchema(
 				("address", IntegerSchema("Start address"), true),
 				("data", new JsonObject() { ["type"] = "array", ["items"] = IntegerSchema("Byte"), ["description"] = "Byte array" }, true),
 				("type", StringSchema("Memory type"), false)
 			), ToolWriteMemory);
-			AddTool(tools, "read_word", "Read a 16-bit little-endian word.", ObjectSchema(
+			AddTool(tools, "read_word", "Read a 16-bit little-endian word. Returns {memoryType, address, value, hex}.", ObjectSchema(
 				("address", IntegerSchema("Address"), true),
 				("type", StringSchema("Memory type"), false)
 			), ToolReadWord);
-			AddTool(tools, "write_word", "Write a 16-bit little-endian word.", ObjectSchema(
+			AddTool(tools, "write_word", "Write a 16-bit little-endian word. Returns {memoryType, address, value, hex, readBack, verified}.", ObjectSchema(
 				("address", IntegerSchema("Address"), true),
 				("value", IntegerSchema("Value 0-65535"), true),
 				("type", StringSchema("Memory type"), false)
@@ -216,7 +228,7 @@ namespace Mesen.Mcp
 			AddTool(tools, "get_input", "Get current override state for a controller port.", ObjectSchema(("port", IntegerSchema("Port index 0-7"), false)), ToolGetInput);
 			AddTool(tools, "clear_input", "Clear input override for one or all ports.", ObjectSchema(("port", IntegerSchema("Optional port"), false)), ToolClearInput);
 
-			AddTool(tools, "get_label_address", "Resolve debugger label to address.", ObjectSchema(("label", StringSchema("Label name"), true)), ToolGetLabelAddress);
+			AddTool(tools, "get_label_address", "Resolve a debugger label. Returns {label, address, hex, memoryType, cpuAddress, length}: address is the label's own (usually absolute ROM/RAM) address in memoryType, cpuAddress the CPU-visible address when mapped.", ObjectSchema(("label", StringSchema("Label name"), true)), ToolGetLabelAddress);
 
 			AddTool(tools, "get_capabilities", "Report current runtime and CPU/debug feature capabilities.", EmptySchema(), ToolGetCapabilities);
 			AddTool(tools, "get_disassembly", "Get disassembly rows from an address.", ObjectSchema(
@@ -347,25 +359,6 @@ namespace Mesen.Mcp
 			return McpToolResult.Text(node.ToJsonString(new JsonSerializerOptions() { WriteIndented = true }));
 		}
 
-		private McpToolResult ToolRewind(JsonElement args)
-		{
-			int seconds = Math.Max(1, GetRequiredInt(args, "seconds"));
-			int remaining = seconds;
-			while(remaining >= 60) {
-				EmuApi.ExecuteShortcut(new ExecuteShortcutParams() { Shortcut = EmulatorShortcut.RewindOneMin });
-				remaining -= 60;
-			}
-			while(remaining >= 10) {
-				EmuApi.ExecuteShortcut(new ExecuteShortcutParams() { Shortcut = EmulatorShortcut.RewindTenSecs });
-				remaining -= 10;
-			}
-			while(remaining > 0) {
-				EmuApi.ExecuteShortcut(new ExecuteShortcutParams() { Shortcut = EmulatorShortcut.Rewind });
-				remaining--;
-			}
-			return McpToolResult.Text($"Queued rewind for {seconds} second(s).");
-		}
-
 		private McpToolResult ToolWriteMemory(JsonElement args)
 		{
 			int address = GetRequiredInt(args, "address");
@@ -381,7 +374,21 @@ namespace Mesen.Mcp
 				throw new InvalidOperationException("write range exceeds memory bounds.");
 			}
 			DebugApi.SetMemoryValues(memType, (uint)address, data, data.Length);
-			return McpToolResult.Text($"Wrote {data.Length} byte(s) to 0x{address:X} ({memType}).");
+			byte[] verify = DebugApi.GetMemoryValues(memType, (uint)address, (uint)(address + data.Length - 1));
+			long combined = 0;
+			for(int i = 0; i < Math.Min(data.Length, 4); i++) {
+				combined |= (long)data[i] << (8 * i);
+			}
+			return Json(new JsonObject() {
+				["memoryType"] = CamelName(memType),
+				["address"] = address,
+				["addressHex"] = $"0x{address:X}",
+				["written"] = data.Length,
+				["bytes"] = new JsonArray(data.Select(b => (JsonNode?)JsonValue.Create((int)b)).ToArray()),
+				["verified"] = verify.AsSpan().SequenceEqual(data),
+				["value"] = data.Length <= 4 ? JsonValue.Create(combined) : null,
+				["hex"] = data.Length <= 4 ? JsonValue.Create("0x" + combined.ToString("X" + (data.Length * 2))) : null
+			});
 		}
 
 		private McpToolResult ToolReadWord(JsonElement args)
@@ -389,9 +396,18 @@ namespace Mesen.Mcp
 			int address = GetRequiredInt(args, "address");
 			CpuType cpu = GetPrimaryCpuType();
 			MemoryType memType = ResolveMemoryType(GetOptionalString(args, "type") ?? "cpuDebug", cpu);
+			int size = DebugApi.GetMemorySize(memType);
+			if(address < 0 || address + 1 >= size) {
+				throw new McpToolException("out_of_range", $"address 0x{address:X} + 1 is outside {CamelName(memType)} (size 0x{size:X}).");
+			}
 			byte[] data = DebugApi.GetMemoryValues(memType, (uint)address, (uint)(address + 1));
 			int value = data[0] | (data[1] << 8);
-			return McpToolResult.Text($"0x{value:X4} ({value})");
+			return Json(new JsonObject() {
+				["memoryType"] = CamelName(memType),
+				["address"] = address,
+				["value"] = value,
+				["hex"] = $"0x{value:X4}"
+			});
 		}
 
 		private McpToolResult ToolWriteWord(JsonElement args)
@@ -401,8 +417,21 @@ namespace Mesen.Mcp
 			CpuType cpu = GetPrimaryCpuType();
 			MemoryType memType = ResolveMemoryType(GetOptionalString(args, "type") ?? "cpuDebug", cpu);
 			byte[] data = new byte[] { (byte)(value & 0xFF), (byte)((value >> 8) & 0xFF) };
+			int size = DebugApi.GetMemorySize(memType);
+			if(address < 0 || address + 1 >= size) {
+				throw new McpToolException("out_of_range", $"address 0x{address:X} + 1 is outside {CamelName(memType)} (size 0x{size:X}).");
+			}
 			DebugApi.SetMemoryValues(memType, (uint)address, data, data.Length);
-			return McpToolResult.Text($"Wrote 0x{value:X4} at 0x{address:X} ({memType}).");
+			byte[] verify = DebugApi.GetMemoryValues(memType, (uint)address, (uint)(address + 1));
+			int actual = verify[0] | (verify[1] << 8);
+			return Json(new JsonObject() {
+				["memoryType"] = CamelName(memType),
+				["address"] = address,
+				["value"] = value & 0xFFFF,
+				["hex"] = $"0x{value & 0xFFFF:X4}",
+				["readBack"] = actual,
+				["verified"] = actual == (value & 0xFFFF)
+			});
 		}
 
 		private McpToolResult ToolRevertRomChanges(JsonElement _)
@@ -521,37 +550,63 @@ namespace Mesen.Mcp
 			if(result == null) {
 				throw new InvalidOperationException($"Label not found: {label}");
 			}
-			return McpToolResult.Text($"0x{result.Address:X} ({result.Address})");
+			int? cpuAddress = null;
+			try {
+				AddressInfo rel = DebugApi.GetRelativeAddress(result.GetAbsoluteAddress(), GetPrimaryCpuType());
+				if(rel.Address >= 0) {
+					cpuAddress = rel.Address;
+				}
+			} catch { }
+			return Json(new JsonObject() {
+				["label"] = label,
+				["cpuAddress"] = cpuAddress,
+				["cpuAddressHex"] = cpuAddress != null ? $"0x{cpuAddress:X6}" : null,
+				["address"] = (long)result.Address,
+				["hex"] = $"0x{result.Address:X}",
+				["memoryType"] = CamelName(result.MemoryType),
+				["length"] = (long)result.Length,
+				["comment"] = string.IsNullOrEmpty(result.Comment) ? null : result.Comment
+			});
 		}
 
 		private McpToolResult ToolGetCapabilities(JsonElement _)
 		{
-			CpuType cpu = GetPrimaryCpuType();
-			JsonObject node = new JsonObject() {
-				["cpuType"] = cpu.ToString(),
-				["consoleType"] = cpu.GetConsoleType().ToString(),
-				["supportsAssembler"] = cpu.SupportsAssembler(),
-				["supportsCallStack"] = cpu.SupportsCallStack(),
-				["supportsFunctionList"] = cpu.SupportsFunctionList(),
-				["supportsMemoryMappings"] = cpu.SupportsMemoryMappings(),
-				["hasDummyOperations"] = cpu.HasDummyOperations(),
-				["memoryTypes"] = new JsonArray(GetSupportedMemoryTypeNames(cpu).Select(x => (JsonNode?)x).ToArray()),
-				["serverVersion"] = ServerVersion,
-				["resultsDir"] = ResultsDir,
-				["libDir"] = LibDir,
-				["flags"] = new JsonObject() {
-					["video"] = !_options.NoVideo,
-					["audio"] = !_options.NoAudio,
-					["input"] = !_options.NoInput,
-					["turboDefault"] = _options.NoVideo && _options.NoAudio
-				},
-				["limits"] = new JsonObject() {
-					["maxFramesPerCall"] = MaxFramesPerCall,
-					["scriptLogRing"] = ScriptLogRingSize,
-					["maxCdlBytes"] = MaxCdlBase64Bytes
-				},
-				["labelCount"] = LabelManager.GetAllLabels().Count
+			JsonObject node = new JsonObject();
+			bool romLoaded = EmuApi.IsRunning();
+			node["romLoaded"] = romLoaded;
+			if(romLoaded) {
+				CpuType cpu = GetPrimaryCpuType();
+				node["cpuType"] = cpu.ToString();
+				node["consoleType"] = cpu.GetConsoleType().ToString();
+				node["supportsAssembler"] = cpu.SupportsAssembler();
+				node["supportsCallStack"] = cpu.SupportsCallStack();
+				node["supportsFunctionList"] = cpu.SupportsFunctionList();
+				node["supportsMemoryMappings"] = cpu.SupportsMemoryMappings();
+				node["hasDummyOperations"] = cpu.HasDummyOperations();
+				node["memoryTypes"] = new JsonArray(GetSupportedMemoryTypeNames(cpu).Select(x => (JsonNode?)x).ToArray());
+			} else {
+				node["note"] = "No ROM is loaded: CPU-specific fields are omitted. Call load_rom, then get_capabilities again.";
+			}
+			node["serverVersion"] = ServerVersion;
+			node["resultsDir"] = ResultsDir;
+			node["resultsDirCloudSynced"] = LooksCloudSynced(ResultsDir);
+			node["libDir"] = LibDir;
+			node["libDirs"] = new JsonArray(LibDirs.Select(d => (JsonNode?)d).ToArray());
+			node["hostPath"] = Environment.ProcessPath;
+			node["baseDirectory"] = AppContext.BaseDirectory;
+			node["homeFolder"] = ConfigManager.HomeFolder;
+			node["flags"] = new JsonObject() {
+				["video"] = !_options.NoVideo,
+				["audio"] = !_options.NoAudio,
+				["input"] = !_options.NoInput,
+				["turboDefault"] = _options.NoVideo && _options.NoAudio
 			};
+			node["limits"] = new JsonObject() {
+				["maxFramesPerCall"] = MaxFramesPerCall,
+				["scriptLogRing"] = ScriptLogRingSize,
+				["maxCdlBytes"] = MaxCdlBase64Bytes
+			};
+			node["labelCount"] = romLoaded ? LabelManager.GetAllLabels().Count : 0;
 			return McpToolResult.Text(node.ToJsonString(new JsonSerializerOptions() { WriteIndented = true }));
 		}
 
@@ -648,9 +703,14 @@ namespace Mesen.Mcp
 				case ConsoleNotificationType.CodeBreak:
 					BreakEvent br = System.Runtime.InteropServices.Marshal.PtrToStructure<BreakEvent>(e.Parameter);
 					HandleStepCompletionNotification(br);
+					//MCP-29: step completions (and the internal temporary breakpoints) are not breakpoint hits.
+					if(ClassifyBreak(br.Source) == "done" || br.BreakpointId == TempBreakpointId || (br.BreakpointId < 0 && br.Source == BreakSource.Breakpoint)) {
+						break;
+					}
 					JsonObject breakPayload = new JsonObject() {
 						["event"] = "breakpoint_hit",
 						["breakpointId"] = br.BreakpointId,
+						["source"] = br.Source.ToString(),
 						["cpuType"] = br.SourceCpu.ToString(),
 						["address"] = br.Operation.Address,
 						["value"] = br.Operation.Value,

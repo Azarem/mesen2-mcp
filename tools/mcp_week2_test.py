@@ -121,7 +121,7 @@ def main():
         c.call("unload_script", name="setter")
 
         err, text, _ = c.call("read_word", address=0xFFEA)
-        nmi = int(text.split()[0], 16)
+        nmi = json.loads(text)["value"]
         err, ru = call_json(c, "run_until", condition={"type": "pcEquals", "pc": nmi}, maxFrames=30)
         check("run_until pcEquals", not err and ru.get("met") is True and ru.get("cpu", {}).get("pc") == nmi, str(ru)[:300])
         err, br = call_json(c, "get_capabilities")

@@ -16,6 +16,15 @@ namespace Mesen.Mcp
 			Console.Error.WriteLine($"[{DateTime.UtcNow:O}] [mcp] {message}");
 		}
 
+		/// <summary>Always written to stderr (never stdout), regardless of MESEN_MCP_DEBUG. For watchdog and fatal diagnostics.</summary>
+		public static void Always(string message)
+		{
+			try {
+				Console.Error.WriteLine($"[{DateTime.UtcNow:O}] [mcp][watchdog] {message}");
+			} catch {
+			}
+		}
+
 		public static void Error(string message, Exception? ex = null)
 		{
 			if(!_enabled) {

@@ -47,7 +47,7 @@ CATEGORIES = [
         "load_script", "run_script", "get_script_log", "get_script_result", "list_scripts", "unload_script",
         "list_recipes", "run_recipe"]),
     ("Server and events", [
-        "get_capabilities", "self_test", "subscribe_events"]),
+        "get_capabilities", "get_server_status", "self_test", "subscribe_events"]),
 ]
 
 

@@ -232,46 +232,49 @@ To publish: edit `mcp-version.txt`, commit, push to `master`.
 | `--mcp-rom=<file>` | Load this ROM at startup. |
 | `--mcp-savestatepath=<file>` | After the ROM, load this state file. It must exist; a sidecar (`<file>.json`) naming another ROM is refused and reported as `startupWarning` in `get_rom_info`. |
 | `--mcp-savestateslot=<1-10>` | Load the ROM's numbered save-state slot instead (exclusive with `--mcp-savestatepath`). |
-| `--mcp-results-dir=<dir>` | Sandbox for result files, screenshots, traces and every relative output path. Default `<Mesen home>/McpResults`. |
-| `--mcp-lib-dir=<dir>` | Folder with the Lua kit modules and recipes. Default `lua/lib` next to the host, else `tools/lua/lib`. |
+| `--mcp-results-dir=<dir>` | Sandbox for result files, screenshots, traces and every relative output path. Default `%LOCALAPPDATA%\Mesen2Mcp\results` (`~/.local/share/Mesen2Mcp/results` on Linux/macOS), never the Documents folder, which OneDrive may redirect. `get_capabilities` shows the effective folder (`resultsDir`, with `resultsDirCloudSynced`). |
+| `--mcp-lib-dir=<dir>[;<dir>...]` | Extra folders with Lua kit modules (`<dir>/*.lua`) and recipes (`<dir>/recipes/*.lua`). Repeatable, or `;`-separated. They are searched **after** the server's own `lua/lib` (next to the host, else `tools/lua/lib`), so a project kit and the shipped `mesen_kit`/`iog_kit` work together. `get_capabilities` and `list_recipes` list the effective `libDirs`. |
 | `--mcp-video`, `--mcp-audio`, `--mcp-input` | Enable video output, audio output, live input devices. All are off by default (headless, fastest). Screenshots do not need `--mcp-video`. |
 
 ## Conventions
 
 - **Transport.** stdout carries only JSON-RPC; native logging goes to stderr. Tool calls run one at a time. An argument that is not in a tool's schema is rejected with an error, not ignored.
-- **Results.** A tool returns one JSON text block (`take_screenshot` also returns a PNG image block). A few legacy tools (`read_memory` with `format: "hex"`, for example) return plain text.
+- **Watchdog.** Every call runs under a watchdog: `timeoutMs` plus 15 s (120 s when the tool has no `timeoutMs`; `MESEN_MCP_WATCHDOG_GRACE_MS` changes the 15 s). A call that exceeds it returns `{"error": {"code": "timeout", "recentCalls": [...]}}`, the emulator is paused, and the last calls are written to stderr. While that call is still running inside the emulator, other calls return `{"error": {"code": "busy"}}`; `get_server_status` (never blocked) shows the state and the last five calls.
+- **Results.** A tool returns one JSON text block (`take_screenshot` also returns a PNG image block). A few tools return plain text (`read_memory` with `format: "hex"`, `get_prg_rom_offset`). `read_memory` formats: `bytes` returns `{memoryType, address, length, truncated, bytes: [...]}`, `words_le` the same with `words`, `base64` with `data`. `read_word`, `write_word` and `write_memory` return `{memoryType, address, value, hex, ...}` and `get_label_address` returns `{label, address, hex, memoryType, cpuAddress}`.
 - **Errors.** Expected failures return `isError: true` with `{"error": {"code": "...", "message": "...", "details": {...}}}` (for example `rom_mismatch`, `invalid_condition`, `no_trace`). Unexpected failures return `Error: <message>` text.
 - **Stepping tools** (`advance_frame`, `step_*`, `run_script`, `run_until`, `play_input`, `trace_between`, ...) block until done, a breakpoint hits or the timeout expires and return `{stopReason, framesAdvanced, instructionsExecuted, frame, elapsedMs, framesPerSecond, cpu, break?}`. `stopReason` is `done`, `breakpoint`, `break` (BRK/STP exception), `script_done`, `condition` or `timeout`. `cpu` on SNES is `{k, pc, pc24, a, x, y, sp, d, dbr, ps, psFlags, emulationMode}`.
 - **Turbo.** `turbo: true` removes the frame limiter for the call. It defaults to on when the server runs without video and audio (about 200-370 frames per second on a desktop).
 - **Addresses.** Tools that take a CPU address accept an integer or a `"BB:AAAA"` string. Memory-type names (`snesMemory`, `snesPrgRom`, `snesWorkRam`, `snesCgRam`, `snesVideoRam`, `snesSpriteRam`, `spcRam`, ...) are listed by `list_memory_types`; the short names `cgram`, `vram`, `spcram`, `dsp`, `palette` also work.
 - **Files.** Relative output paths (`dump_memory`, `take_screenshot`, `start_trace`, `save_cdl`, `record_input`, ...) go to the results folder. Scripts write there with `emu.mcp.writeFile(name, bytes, append?)`; names with `..`, absolute paths or drive letters are refused.
 - **States.** `save_state_file` writes a sidecar `<path>.json` with the ROM SHA-1; `load_state_file` and `load_rom` refuse a state saved for another ROM (`rom_mismatch`) unless `requireRomMatch=false`.
-- **Slots (two ROMs).** Every tool accepts an optional `slot` string. `load_rom {path, slot}` registers the ROM under that name; any other tool called with `slot` first switches to that ROM (the server saves the state and labels of the slot it leaves, and restores the other). `list_slots`, `switch_slot` and `compare_runs` build on this.
-- **Events.** The server sends `notifications/mesen/event` notifications. By default: `breakpoint_hit`, `game_loaded`, `game_paused`, `game_resumed`, `emulation_stopped`. `subscribe_events` selects the set and adds `state_loaded`, `frame_end`, `script_log` and `error`.
+- **Slots (two ROMs).** Every tool accepts an optional `slot` string. `load_rom {path, slot}` registers the ROM under that name; any other tool called with `slot` first switches to that ROM (the server saves the state and labels of the slot it leaves, and restores the other). `load_rom` with a `slot` makes that slot the active one (the slot it leaves is saved to `<results>/slots/<name>.mss`), so call `switch_slot` before reading anything that belongs to the other ROM. `list_slots`, `switch_slot` and `compare_runs` build on this.
+- **Rewind.** `rewind {seconds | frames}` uses the emulator's rewind history (granularity 30 frames), lands exactly that far back and leaves the emulator in normal mode with Lua callbacks intact. It replies `{framesRewound, frameBefore, frameAfter, jumps, forwardFrames}`; with no or too little history it refuses (`rewind_unavailable`, `rewind_insufficient_history`, both with `rewindAvailableFrames`) and restores the state unless `allowPartial` is set. For repeatable time travel prefer `save_state_file`/`load_state_file`.
+- **Events.** The server sends `notifications/mesen/event` notifications. By default: `breakpoint_hit` (halting breakpoints and exception breaks only; step completions are not events), `game_loaded`, `game_paused`, `game_resumed`, `emulation_stopped`. `subscribe_events` selects the set and adds `state_loaded`, `frame_end`, `script_log` and `error`.
 
 ## Breakpoints and conditions
 
 `set_breakpoints` takes a list of `{callbackType (read|write|exec, comma list), startAddress, endAddress, memType, condition, action, maxLogged, name}`.
 
 - `action: "break"` (default) is a native breakpoint that halts emulation. Its `condition` is checked with the native expression evaluator (a bad one fails with `invalid_condition`).
-- `action: "count"` and `"log"` never halt. They run as a hidden Lua script, so their conditions use this subset of the Mesen syntax: `value`, `oldvalue`, `address`, `pc`, `a`, `x`, `y`, `sp`, `d`, `k`, `dbr`, `ps`, `frame`, `[addr]`, `{addr}` and `&& || ! != ^ /`. Read the counts and logged rows with `get_breakpoint_hits`.
+- `action: "count"` and `"log"` never halt. They run as a hidden Lua script, so their conditions use this subset of the Mesen syntax: `value`, `oldvalue`, `address`, `pc`, `a`, `x`, `y`, `sp`, `d`, `k`, `dbr`, `ps`, `frame`, `[addr]`, `{addr}` and `&& || ! != ^ /`. `action: "halt"` is accepted as an alias of `break`. Read the counts and logged rows with `get_breakpoint_hits`.
+- **Addresses in hits.** A breakpoint on the CPU type (`memType: "snesMemory"`, the default) reports the address the code used, bank alias included: `$00:82F8` and `$80:82F8` are different breakpoints, and a WRAM write by code running with DBR `$81` is reported as `0x8109EC`. Each hit row therefore also carries `memType`, `absType`/`absOffset` and `wramOffset`, `prgOffset`, `sramOffset` (and `pcPrgOffset`, `pcWramOffset` for the pc). To avoid aliases altogether, break on `snesPrgRom` (offsets in the ROM file) or `snesWorkRam` (offsets in WRAM). In Lua callbacks use `kit.wramOffset(addr)`.
 
 ## Lua scripting
 
 `run_script {code, frames, includes?}` pauses, loads the script, advances, collects the log and the result, and unloads it. `load_script` keeps a script running across calls. The server prepends a one-line prelude (user line numbers do not shift) that adds:
 
 - `emu.mcp.result(table)`: store a JSON result (about 90 KB limit; read it with `get_script_result`).
-- `emu.mcp.done()`: stop the run early (`stopReason: "script_done"`).
+- `emu.mcp.done()`: stop the run early (`stopReason: "script_done"`). It may be called inside a callback or at script load (the run then ends at once, `framesAdvanced: 0`); `kit.finish(result)` does the same after storing the result.
 - `emu.mcp.writeFile(name, bytes, append?)`: write into the results folder; returns `nil, err` if refused.
 
 `io` and `os` are not available to scripts. The native log keeps 500 rows; the server harvests it between frame chunks into a 5000-row ring (`get_script_log`), but a script that logs more than 500 rows in one frame loses rows. `emu.createSavestate` works only inside an exec memory callback.
 
 `includes: ["mesen_kit", "iog_kit"]` loads modules from the lib folder:
 
-- `mesen_kit`: `kit.r8/r16/w8/w16`, `kit.setBit/getBit`, `kit.frame`, `kit.onFrame`, `kit.machine`, `kit.pulse/stopPulse`, `kit.topCounts`, `kit.finish(result)`.
-- `iog_kit` (Illusion of Gaia): `iog.warp{scene, x, y, facing, scroll, flags, ...}`, `iog.setEventFlag/getEventFlag`, `iog.state()`.
+- `mesen_kit`: `kit.r8/r16/w8/w16`, `kit.setBit/getBit`, `kit.frame`, `kit.onFrame`, `kit.machine`, `kit.pulse/stopPulse`, `kit.topCounts`, `kit.wramOffset(addr)`, `kit.finish(result)`.
+- `iog_kit` (Illusion of Gaia): `iog.warp{scene, x, y, facing, scroll, flags, quick, ...}` (`quick = true` writes only `sceneNext`, keeps the scene's default spawn and ignores x/y; a scene other than the default without x/y uses it automatically; it also works from the title screen after about 450 frames), `iog.setEventFlag/getEventFlag`, `iog.state()`.
 
-`list_recipes` and `run_recipe {name, args?, frames?}` run ready-made scripts: `warp`, `census_pc`, `exec_coverage`. In a recipe the Lua table `args` holds the arguments.
+`list_recipes` and `run_recipe {name, args?, frames?}` run ready-made scripts from every lib folder: `warp`, `census_pc`, `exec_coverage` plus your own. In a recipe the Lua table `args` holds the arguments. `run_until` takes `includes` as a top-level argument too.
 
 ## Typical workflows
 
@@ -296,6 +299,7 @@ All tests run against a real ROM and take `--host <MesenMcpHost.dll>` (use the D
 | `python tools/mcp_p0_test.py` | Original tool set, ROM identity, bound states, stepping, CDL, script I/O |
 | `python tools/mcp_week2_test.py` | Labels, turbo and `run_until`, result files, Lua kit and recipes |
 | `python tools/mcp_week3_test.py` | Breakpoints, memory, trace, screenshots, PPU state, input, events, slots, `self_test` |
+| `python tools/mcp_week4_test.py` | Server 0.5.0: several lib folders, capabilities without a ROM, JSON memory tools, hit offsets, rewind, watchdog, quick warp |
 | `python tools/mcp_iog_e2e_test.py` | End to end: Illusion of Gaia warped into Edward's Castle |
 | `python tools/mcp_smoke_test.py dotnet <MesenMcpHost.dll>` | No ROM needed: starts the server, checks `initialize`, the version and the tool list, then `stop` (used by CI) |
 | `python tools/verify_release.py <dist> <rid>` | No ROM needed: checks a published folder for every file the server needs (used by CI) |
@@ -308,7 +312,7 @@ More detail: [MCP_TOOLS_CONTRACT.md](MCP_TOOLS_CONTRACT.md) (behaviour of each e
 ## Tool Reference
 
 <!-- MCP-API:BEGIN -->
-_80 tools, generated from the server's `tools/list` by `tools/gen_api_docs.py`. Every tool also accepts the optional `slot` argument (see Conventions)._
+_81 tools, generated from the server's `tools/list` by `tools/gen_api_docs.py`. Every tool also accepts the optional `slot` argument (see Conventions)._
 
 | Category | Tools |
 |---|---|
@@ -322,7 +326,7 @@ _80 tools, generated from the server's `tools/list` by `tools/gen_api_docs.py`. 
 | [Input](#input) | [`get_input`](#get_input), [`set_input`](#set_input), [`clear_input`](#clear_input), [`play_input`](#play_input), [`record_input`](#record_input), [`play_input_file`](#play_input_file) |
 | [Save states](#save-states) | [`save_state_file`](#save_state_file), [`load_state_file`](#load_state_file), [`list_states`](#list_states) |
 | [Lua scripting and recipes](#lua-scripting-and-recipes) | [`load_script`](#load_script), [`run_script`](#run_script), [`get_script_log`](#get_script_log), [`get_script_result`](#get_script_result), [`list_scripts`](#list_scripts), [`unload_script`](#unload_script), [`list_recipes`](#list_recipes), [`run_recipe`](#run_recipe) |
-| [Server and events](#server-and-events) | [`get_capabilities`](#get_capabilities), [`self_test`](#self_test), [`subscribe_events`](#subscribe_events) |
+| [Server and events](#server-and-events) | [`get_capabilities`](#get_capabilities), [`get_server_status`](#get_server_status), [`self_test`](#self_test), [`subscribe_events`](#subscribe_events) |
 
 ### Session, ROM and slots
 
@@ -432,7 +436,7 @@ Step CPU instructions synchronously. Returns stopReason, instructionsExecuted, f
 
 #### `step_scanline`
 
-Step PPU scanlines synchronously. Returns stopReason, frame and the CPU registers.
+Step PPU scanlines synchronously. Returns stopReason, frame, the CPU registers, scanlinesRequested, scanlinesAdvanced and the current scanline (framesAdvanced stays 0 for steps shorter than a frame).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -450,15 +454,17 @@ Step CPU cycles synchronously. Returns stopReason, frame and the CPU registers.
 
 #### `rewind`
 
-Rewind emulation by seconds.
+Rewind emulation by an exact amount of time using the emulator's rewind history (needs the rewind buffer enabled in the preferences and at least ~2 s of history). The rewind history has a granularity of 30 frames, so the server jumps back in whole steps and then plays forward the surplus: the result lands exactly seconds*fps frames earlier. Returns {framesRewound, frameBefore, frameAfter, requestedFrames, jumps, forwardFrames}. Refuses with rewind_unavailable (rewindAvailableFrames) when there is no history, and with rewind_insufficient_history (state restored) when more was requested than the history holds, unless allowPartial is true. The emulator is left in normal (not rewinding) mode with callbacks intact.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `seconds` | integer | yes | Seconds to rewind |
+| `seconds` | integer |  | Seconds to rewind (use frames for sub-second precision) |
+| `frames` | integer |  | Frames to rewind (alternative to seconds) |
+| `allowPartial` | boolean |  | Rewind as far as the history reaches when it is shorter than requested (default false) |
 
 #### `run_until`
 
-Run until a condition holds, a breakpoint hits, maxFrames pass or timeoutMs elapses. condition is one of: {type:"memoryEquals", memType?, address, size?(1-4, little endian), value, mask?} checked at the end of every frame (memType default workRam); {type:"pcEquals", pc} (number or "BB:AAAA") using a temporary exec breakpoint; {type:"lua", expr, includes?} a Lua expression evaluated at the end of every frame (kit helpers available when included); {type:"breakpoint"} runs until a configured breakpoint hits. Returns stopReason (condition|breakpoint|done=maxFrames reached|timeout|error), met, framesAdvanced, frame, framesPerSecond and the CPU registers.
+Run until a condition holds, a breakpoint hits, maxFrames pass or timeoutMs elapses. condition is one of: {type:"memoryEquals", memType?, address, size?(1-4, little endian), value, mask?} checked at the end of every frame (memType default workRam); {type:"pcEquals", pc} (number or "BB:AAAA") using a temporary exec breakpoint; {type:"lua", expr, includes?} (includes may also be given as a top-level argument) a Lua expression evaluated at the end of every frame (kit helpers available when included); {type:"breakpoint"} runs until a configured breakpoint hits. Returns stopReason (condition|breakpoint|done=maxFrames reached|timeout|error), met, framesAdvanced, frame, framesPerSecond and the CPU registers.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -466,12 +472,13 @@ Run until a condition holds, a breakpoint hits, maxFrames pass or timeoutMs elap
 | `maxFrames` | integer |  | Give up after this many frames (default 600) |
 | `timeoutMs` | integer |  | Give up after this many milliseconds |
 | `turbo` | boolean |  | Run without the frame limiter |
+| `includes` | array<string> |  | Kit modules for a lua condition (same as condition.includes) |
 
 ### Memory
 
 #### `read_memory`
 
-Read bytes from memory (at most 65536 per call). format: hex (default hex dump), bytes (JSON array), words_le (JSON array of 16-bit little-endian words) or base64.
+Read bytes from memory (at most 65536 per call). format: hex (default hex dump), bytes ({memoryType, address, length, truncated, bytes:[...]}), words_le ({..., words:[...]} 16-bit little-endian) or base64 ({..., data}).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -482,7 +489,7 @@ Read bytes from memory (at most 65536 per call). format: hex (default hex dump),
 
 #### `write_memory`
 
-Write bytes to memory.
+Write bytes to memory. Returns {memoryType, address, written, bytes, verified, value, hex} (value/hex only for up to 4 bytes, little-endian).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -492,7 +499,7 @@ Write bytes to memory.
 
 #### `read_word`
 
-Read a 16-bit little-endian word.
+Read a 16-bit little-endian word. Returns {memoryType, address, value, hex}.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -501,7 +508,7 @@ Read a 16-bit little-endian word.
 
 #### `write_word`
 
-Write a 16-bit little-endian word.
+Write a 16-bit little-endian word. Returns {memoryType, address, value, hex, readBack, verified}.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -581,7 +588,7 @@ Convert PPU address to CHR ROM offset if mapped.
 
 #### `get_access_summary`
 
-Access counters and CDL flags summarised per named range. ranges: [{name, start, end}] (absolute offsets in type, end inclusive), [{name, cpuStart, cpuEnd}] (CPU addresses, converted) or [{name, label, length?}]; or give rangesPath (JSON file with such a list). Returns per range exec/read/write counts, first/last access stamps, the CDL flag union and a verdict (accessed | never_accessed).
+Access counters and CDL flags summarised per named range. ranges: [{name, start, end}] (absolute offsets in type, end inclusive), [{name, cpuStart, cpuEnd}] (CPU addresses, converted) or [{name, label, length?}]; or give rangesPath (JSON file with such a list). Returns per range exec/read/write counts, first/last access stamps, the CDL flag union and a verdict (accessed | never_accessed). exec is the SUM of the per-byte execution counters, but the emulator marks only the opcode byte of each executed instruction: for a range starting at an entry point it equals the number of times the entry ran only when no other instruction of the range executed. Use execFirstByte (counter of the first byte), execBytes (bytes with exec > 0) and hottest ({offset, exec} of the most executed byte) to interpret it; for an exact count inside a routine use a count breakpoint.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -640,7 +647,7 @@ Bulk resolve_address. addresses is a list of CPU addresses (numbers or "BB:AAAA"
 
 #### `get_label_address`
 
-Resolve debugger label to address.
+Resolve a debugger label. Returns {label, address, hex, memoryType, cpuAddress, length}: address is the label's own (usually absolute ROM/RAM) address in memoryType, cpuAddress the CPU-visible address when mapped.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -678,7 +685,7 @@ _No parameters._
 
 #### `get_breakpoint_hits`
 
-Counts and logged hits of count/log breakpoints (set_breakpoints). Returns counts per breakpoint id and hit rows {seq, id, frame, kind, address, value, pc, a, x, y, sp, k}.
+Counts and logged hits of count/log breakpoints (set_breakpoints). Returns counts per breakpoint id and hit rows {seq, id, frame, kind, address, value, pc, a, x, y, sp, k} plus memory-type offsets: memType (the breakpoint's type), absType/absOffset, wramOffset / prgOffset / sramOffset of the address and pcPrgOffset / pcWramOffset of the pc. A breakpoint on the CPU type (snesMemory) reports the address the code used (a bank alias such as $7E0000 or $807FFF can differ from the canonical one); use memType snesPrgRom / snesWorkRam to get offsets directly.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1054,7 +1061,13 @@ Run a shipped recipe (see list_recipes) like run_script: pause, load kit and rec
 
 #### `get_capabilities`
 
-Report the runtime: server and Mesen version, CPU/debug features, tools, the Lua emu.* functions, flags (video/audio/input/scriptIo), limits, results/lib folders and the last self_test result.
+Report the runtime: server and Mesen version, CPU/debug features, tools, the Lua emu.* functions, flags (video/audio/input/scriptIo), limits, the effective results folder (resultsDir) and lib folders (libDirs), the host path and the last self_test result. Works before any ROM is loaded (romLoaded:false, CPU fields omitted).
+
+_No parameters._
+
+#### `get_server_status`
+
+Watchdog view of the server: whether a previous call is still stuck (busy), the last 5 tool calls with their duration and outcome, uptime, romLoaded and paused. Never blocked by a stuck call. Every tool call has a watchdog (timeoutMs + 15 s, or 120 s by default): a call that exceeds it returns {error:{code:"timeout"}} and pauses the emulator; calls made while it is still running return {error:{code:"busy"}}.
 
 _No parameters._
 
@@ -1066,7 +1079,7 @@ _No parameters._
 
 #### `subscribe_events`
 
-Choose which server events are sent as notifications/mesen/event. Types and payloads: breakpointHit {event:breakpoint_hit, breakpointId, cpuType, address, value, memoryType, operationType, callbackType; count/log breakpoints add action, count, newHits, frame}; romLoaded {event:game_loaded}; stateLoaded {event:state_loaded, path}; frameEnd {event:frame_end, frame} (at most every frameEvery frames, sent when a stepping call returns); scriptLog {event:script_log, nextSeq} (new script log rows); error {event:error, tool, message}; gamePaused, gameResumed, emulationStopped. Default (never subscribed): breakpointHit, romLoaded, gamePaused, gameResumed, emulationStopped. An empty list disables all events.
+Choose which server events are sent as notifications/mesen/event. Types and payloads: breakpointHit {event:breakpoint_hit, breakpointId, source, cpuType, address, value, memoryType, operationType, callbackType} for halting breakpoints and exception breaks only (step completions are not events); count/log breakpoints send {event:breakpoint_hit, breakpointId, action, name, count, newHits, frame} when read after a harvest; romLoaded {event:game_loaded}; stateLoaded {event:state_loaded, path}; frameEnd {event:frame_end, frame} (at most every frameEvery frames, sent when a stepping call returns); scriptLog {event:script_log, nextSeq} (new script log rows); error {event:error, tool, message}; gamePaused, gameResumed, emulationStopped. Default (never subscribed): breakpointHit, romLoaded, gamePaused, gameResumed, emulationStopped. An empty list disables all events.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

@@ -179,7 +179,7 @@ namespace Mesen.Mcp
 				ToolStepInstruction);
 
 			AddTool(tools, "step_scanline",
-				"Step PPU scanlines synchronously. Returns stopReason, frame and the CPU registers.",
+				"Step PPU scanlines synchronously. Returns stopReason, frame, the CPU registers, scanlinesRequested, scanlinesAdvanced and the current scanline (framesAdvanced stays 0 for steps shorter than a frame).",
 				ObjectSchema(
 					("count", IntegerSchema("Scanline count (default 1)"), false),
 					("timeoutMs", IntegerSchema("Give up after this many milliseconds (default 10000)"), false)
@@ -784,11 +784,47 @@ namespace Mesen.Mcp
 			int count = Math.Clamp(GetOptionalInt(args, "count") ?? 1, 1, 10000000);
 			int timeoutMs = GetOptionalInt(args, "timeoutMs") ?? 10000;
 			CpuType cpu = GetPrimaryCpuType();
+			long? before = GetAbsoluteScanline(cpu);
 			StepOutcome outcome = RunStep(cpu, count, StepType.PpuScanline, timeoutMs);
 			if(_scriptIds.Count > 0) {
 				HarvestScriptLogs(cpu);
 			}
-			return StepResult(cpu, outcome);
+
+			//MCP-27: a scanline step advances no whole frames; report the scanlines that were actually stepped.
+			JsonObject node = BuildStepResponse(cpu, outcome);
+			long? after = GetAbsoluteScanline(cpu);
+			node["scanlinesRequested"] = count;
+			node["scanlinesAdvanced"] = outcome.StopReason == "done" ? count : (before != null && after != null ? after - before : null);
+			node["scanline"] = GetCurrentScanline(cpu);
+			return Json(node, outcome.StopReason == "timeout");
+		}
+
+		private int? GetCurrentScanline(CpuType cpu)
+		{
+			try {
+				JsonObject ppu = GetPpuStateNode(cpu);
+				foreach(KeyValuePair<string, JsonNode?> kv in ppu) {
+					if(kv.Key.Equals("scanline", StringComparison.OrdinalIgnoreCase) && kv.Value is JsonValue v && v.TryGetValue(out int line)) {
+						return line;
+					}
+				}
+			} catch { }
+			return null;
+		}
+
+		/// <summary>frame * scanlinesPerFrame + scanline, for measuring how many scanlines a step really advanced.</summary>
+		private long? GetAbsoluteScanline(CpuType cpu)
+		{
+			int? line = GetCurrentScanline(cpu);
+			if(line == null) {
+				return null;
+			}
+			try {
+				TimingInfo timing = EmuApi.GetTimingInfo(cpu);
+				return GetFrameCount(cpu) * Math.Max(1, (long)timing.ScanlineCount) + line.Value;
+			} catch {
+				return null;
+			}
 		}
 
 		private McpToolResult ToolStepCpuCycles(JsonElement args)

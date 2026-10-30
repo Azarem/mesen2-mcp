@@ -22,8 +22,8 @@ Alternate (UI executable path):
   - `--mcp-rom=<absolute-path>` to preload a ROM
   - `--mcp-savestatepath=<file>` to load a save-state file after the ROM (must exist; a sidecar naming another ROM is refused and reported as `startupWarning`)
   - `--mcp-savestateslot=<1-10>` to load the ROM's numbered save-state slot instead (exclusive with `--mcp-savestatepath`)
-  - `--mcp-results-dir=<dir>` sandbox folder for result files and relative output paths (default `<Mesen home>/McpResults`)
-  - `--mcp-lib-dir=<dir>` folder with the Lua kit modules and recipes (default `lua/lib` next to the host, else `tools/lua/lib`)
+  - `--mcp-results-dir=<dir>` sandbox folder for result files and relative output paths (default `%LOCALAPPDATA%/Mesen2Mcp/results`)
+  - `--mcp-lib-dir=<dir>[;<dir>...]` extra folders with Lua kit modules and recipes (repeatable; searched after the server's own `lua/lib` next to the host, else `tools/lua/lib`)
 
 The complete tool reference (all 80 tools with parameters) is in [README.md](README.md#tool-reference); the behaviour of the extensions is in [MCP_TOOLS_CONTRACT.md](MCP_TOOLS_CONTRACT.md).
 
@@ -74,7 +74,8 @@ The complete tool reference (all 80 tools with parameters) is in [README.md](REA
 ## Notable Behavior Differences
 
 - Legacy Lua bridge JSON snapshot behavior for `save_state_file`/`load_state_file` is replaced with native save-state files.
-- `rewind` now uses native emulator shortcuts to issue rewind actions.
+- `rewind` uses the native rewind history: whole 10 s / 1 min jumps plus a forward replay of the surplus, so it lands exactly `seconds` (or `frames`) earlier and reports the frames rewound (server 0.5.0). It refuses when there is no history.
+- `read_word`, `write_word`, `write_memory` and `get_label_address` return JSON (0.5.0).
 - `get_chr_rom_offset` is currently NES-focused and returns unsupported for non-NES systems.
 
 ## New Native Tools

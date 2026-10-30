@@ -72,7 +72,8 @@ namespace Mesen.Mcp
 				ToolSetBreakpoints);
 
 			AddTool(tools, "get_breakpoint_hits",
-				"Counts and logged hits of count/log breakpoints (set_breakpoints). Returns counts per breakpoint id and hit rows {seq, id, frame, kind, address, value, pc, a, x, y, sp, k}.",
+				"Counts and logged hits of count/log breakpoints (set_breakpoints). Returns counts per breakpoint id and hit rows {seq, id, frame, kind, address, value, pc, a, x, y, sp, k} plus memory-type offsets: memType (the breakpoint's type), absType/absOffset, wramOffset / prgOffset / sramOffset of the address and pcPrgOffset / pcWramOffset of the pc. " +
+					"A breakpoint on the CPU type (snesMemory) reports the address the code used (a bank alias such as $7E0000 or $807FFF can differ from the canonical one); use memType snesPrgRom / snesWorkRam to get offsets directly.",
 				ObjectSchema(
 					("id", IntegerSchema("Only this breakpoint id"), false),
 					("sinceSeq", IntegerSchema("Only rows with seq greater than this"), false),
@@ -87,7 +88,7 @@ namespace Mesen.Mcp
 				EmptySchema(), ToolListMemoryTypes);
 
 			AddTool(tools, "read_memory",
-				"Read bytes from memory (at most 65536 per call). format: hex (default hex dump), bytes (JSON array), words_le (JSON array of 16-bit little-endian words) or base64.",
+				"Read bytes from memory (at most 65536 per call). format: hex (default hex dump), bytes ({memoryType, address, length, truncated, bytes:[...]}), words_le ({..., words:[...]} 16-bit little-endian) or base64 ({..., data}).",
 				ObjectSchema(
 					("address", IntegerSchema("Start address"), true),
 					("length", IntegerSchema("Byte length"), true),
@@ -119,7 +120,9 @@ namespace Mesen.Mcp
 			// --- MCP-14 --------------------------------------------------------------------------
 			AddTool(tools, "get_access_summary",
 				"Access counters and CDL flags summarised per named range. ranges: [{name, start, end}] (absolute offsets in type, end inclusive), [{name, cpuStart, cpuEnd}] (CPU addresses, converted) or [{name, label, length?}]; " +
-				"or give rangesPath (JSON file with such a list). Returns per range exec/read/write counts, first/last access stamps, the CDL flag union and a verdict (accessed | never_accessed).",
+				"or give rangesPath (JSON file with such a list). Returns per range exec/read/write counts, first/last access stamps, the CDL flag union and a verdict (accessed | never_accessed). " +
+				"exec is the SUM of the per-byte execution counters, but the emulator marks only the opcode byte of each executed instruction: for a range starting at an entry point it equals the number of times the entry ran only when no other instruction of the range executed. " +
+				"Use execFirstByte (counter of the first byte), execBytes (bytes with exec > 0) and hottest ({offset, exec} of the most executed byte) to interpret it; for an exact count inside a routine use a count breakpoint.",
 				ObjectSchema(
 					("type", StringSchema("Memory type of the ranges (default prgRom)"), false),
 					("ranges", new JsonObject() { ["type"] = "array", ["description"] = "Range list" }, false),
@@ -277,8 +280,11 @@ namespace Mesen.Mcp
 				string? condition = GetOptionalString(entry, "condition");
 				string? name = GetOptionalString(entry, "name");
 
+				if(action == "halt" || action == "stop") {
+					action = "break";
+				}
 				if(action != "break" && action != "count" && action != "log") {
-					throw new InvalidOperationException("action must be break, count or log.");
+					throw new InvalidOperationException("action must be break (alias halt), count or log.");
 				}
 
 				if(action == "break") {
@@ -494,6 +500,49 @@ namespace Mesen.Mcp
 			return body;
 		}
 
+		/// <summary>
+		/// MCP-25: next to the raw callback address (the CPU alias for cpu-type breakpoints, the offset itself for
+		/// memory-type breakpoints) add the memory-type offsets: wramOffset, prgOffset, sramOffset and the same for the pc.
+		/// </summary>
+		private void AddHitOffsets(JsonObject row, CpuType cpu)
+		{
+			int id = row["id"]?.GetValue<int>() ?? -1;
+			LuaBreakpointSpec? spec = _luaBreakpoints.FirstOrDefault(b => b.Id == id);
+			MemoryType configured;
+			try { configured = ResolveMemoryType(spec?.MemType ?? "cpuDebug", cpu); } catch { configured = cpu.ToMemoryType(); }
+			row["memType"] = CamelName(configured);
+
+			if(row["address"] is JsonNode addressNode) {
+				long address = addressNode.GetValue<long>();
+				AddressInfo abs = configured == cpu.ToMemoryType()
+					? DebugApi.GetAbsoluteAddress(new AddressInfo() { Address = (int)address, Type = configured })
+					: new AddressInfo() { Address = (int)address, Type = configured };
+				AddOffsetFields(row, "", abs, cpu);
+			}
+			if(row["pc"] is JsonNode pcNode2) {
+				long pc = pcNode2.GetValue<long>();
+				AddressInfo pcAbs = DebugApi.GetAbsoluteAddress(new AddressInfo() { Address = (int)(pc & 0xFFFFFF), Type = cpu.ToMemoryType() });
+				AddOffsetFields(row, "pc", pcAbs, cpu);
+			}
+		}
+
+		private static void AddOffsetFields(JsonObject row, string prefix, AddressInfo abs, CpuType cpu)
+		{
+			string Field(string name) => prefix.Length == 0 ? name : prefix + char.ToUpperInvariant(name[0]) + name.Substring(1);
+			if(abs.Address < 0 || abs.Type == MemoryType.None) {
+				return;
+			}
+			row[Field("absType")] = CamelName(abs.Type);
+			row[Field("absOffset")] = abs.Address;
+			if(abs.Type == cpu.GetSystemRamType()) {
+				row[Field("wramOffset")] = abs.Address;
+			} else if(abs.Type == cpu.GetPrgRomMemoryType()) {
+				row[Field("prgOffset")] = abs.Address;
+			} else if(abs.Type.ToString().EndsWith("SaveRam", StringComparison.Ordinal)) {
+				row[Field("sramOffset")] = abs.Address;
+			}
+		}
+
 		private McpToolResult ToolGetBreakpointHits(JsonElement args)
 		{
 			CpuType cpu = GetPrimaryCpuType();
@@ -551,6 +600,7 @@ namespace Mesen.Mcp
 				}
 				obj["seq"] = Num(entry.Seq);
 				obj["pcHex"] = obj["pc"] is JsonNode pcNode ? $"{pcNode.GetValue<long>():X6}" : null;
+				AddHitOffsets(obj, cpu);
 				hits.Add((JsonNode)obj);
 				lastSeq = entry.Seq;
 			}
@@ -867,7 +917,17 @@ namespace Mesen.Mcp
 					long exec = 0, read = 0, write = 0;
 					ulong firstStamp = ulong.MaxValue, lastStamp = 0;
 					int touched = 0;
-					foreach(AddressCounters c in counters) {
+					int execBytes = 0, hottestIndex = -1;
+					long hottestExec = 0;
+					for(int ci = 0; ci < counters.Length; ci++) {
+						AddressCounters c = counters[ci];
+						if(c.ExecCounter > 0) {
+							execBytes++;
+							if(c.ExecCounter > hottestExec) {
+								hottestExec = c.ExecCounter;
+								hottestIndex = ci;
+							}
+						}
 						exec += c.ExecCounter; read += c.ReadCounter; write += c.WriteCounter;
 						if(c.ExecCounter + c.ReadCounter + c.WriteCounter > 0) {
 							touched++;
@@ -906,6 +966,9 @@ namespace Mesen.Mcp
 						["exec"] = Num(exec),
 						["read"] = Num(read),
 						["write"] = Num(write),
+						["execBytes"] = execBytes,
+						["execFirstByte"] = counters.Length > 0 ? Num(counters[0].ExecCounter) : null,
+						["hottest"] = hottestIndex >= 0 ? new JsonObject() { ["offset"] = start + hottestIndex, ["exec"] = Num(hottestExec) } : null,
 						["bytesTouched"] = touched,
 						["firstStamp"] = touched > 0 ? Num((long)Math.Min(firstStamp, long.MaxValue)) : null,
 						["lastStamp"] = touched > 0 ? Num((long)Math.Min(lastStamp, long.MaxValue)) : null,

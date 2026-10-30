@@ -145,7 +145,7 @@ All results below are JSON text. Expected failures use `{"error": {"code": "..."
 - `run_until(condition, maxFrames?, timeoutMs?, turbo?)` with conditions `memoryEquals {memType?, address, size?, value, mask?}`, `pcEquals {pc}` (temporary exec breakpoint; user breakpoints are kept), `lua {expr, includes?}`, `breakpoint`. `stopReason`: `condition | breakpoint | done (maxFrames) | timeout`; `met` says whether the condition held.
 
 ### Result files (MCP-08)
-- Scripts can call `emu.mcp.writeFile(name, bytes, append?)`. Files go to the sandbox folder (`--mcp-results-dir=`, default `<Mesen home>/McpResults`); names with `..`, absolute paths or drive letters are refused (the call returns `nil, err`). `run_script` reports them as `filesWritten` (`name`, `path`, `bytes`, `sha1`). Relative `path` arguments of `save_cdl`/`load_cdl` resolve into the same folder.
+- Scripts can call `emu.mcp.writeFile(name, bytes, append?)`. Files go to the sandbox folder (`--mcp-results-dir=`, default `%LOCALAPPDATA%/Mesen2Mcp/results`, see 0.5.0); names with `..`, absolute paths or drive letters are refused (the call returns `nil, err`). `run_script` reports them as `filesWritten` (`name`, `path`, `bytes`, `sha1`). Relative `path` arguments of `save_cdl`/`load_cdl` resolve into the same folder.
 - `get_capabilities` reports `serverVersion`, `resultsDir`, `libDir`, `flags`, `limits`, `labelCount`.
 
 ### Lua kit and recipes (MCP-15)
@@ -186,6 +186,34 @@ All results below are JSON text. Expected failures use `{"error": {"code": "..."
 ### Capabilities and self test (MCP-20)
 - `get_capabilities` also reports `mesenVersion`, the tool list, the Lua functions that exist, flags, limits, slots and `lastSelfTest`.
 - `self_test`: checks the features that scripts rely on (memory callbacks, `emu.setInput`, Lua save states, log harvest, stepping, state files, breakpoints, CDL, sandbox, screen buffer). The emulator state is restored afterwards.
+
+## Extensions (server 0.5.0, harness findings: MCP-21..30, tool issues T-01..T-19)
+
+### Folders and capabilities (MCP-21, MCP-22, MCP-30)
+- `--mcp-lib-dir=<dir>[;<dir>...]` (repeatable): project kit modules (`<dir>/*.lua`) and recipes (`<dir>/recipes/*.lua`) are searched after the server's own `lua/lib`; the first match wins. `list_recipes` merges them (each entry has its `dir`) and returns `libDirs`.
+- The default results folder is `%LOCALAPPDATA%\Mesen2Mcp\results` (`~/.local/share/Mesen2Mcp/results`), no longer a folder under Documents. `get_capabilities` reports `serverVersion`, `resultsDir`, `resultsDirCloudSynced`, `libDir`, `libDirs`, `hostPath`, `baseDirectory`, `homeFolder`, and works without a ROM (`romLoaded: false`, CPU fields omitted; the same for `list_recipes`).
+- The host project builds to `McpHost/bin/<Configuration>/net8.0/` whatever RuntimeIdentifier is passed (no more `net8.0/win-x64/`), so a path registered in `mcp.json` is the current build.
+
+### Watchdog (MCP-27, T-12)
+- Every call has a watchdog (`timeoutMs` + 15 s, else 120 s, times 4 for the multi-phase tools `compare_runs`, `self_test`, `play_input*`, `trace_between`). A call that exceeds it returns `{error: {code: "timeout", tool, limitMs, paused, recentCalls}}` and pauses the emulator; the last calls are written to stderr. Until the abandoned call ends, other calls return `{error: {code: "busy", stuckTool}}`.
+- New `get_server_status`: `{busy, stuckTool, stuckForMs, uptimeSeconds, romLoaded, paused, recentCalls[5]}`; never blocked.
+- `step_scanline` adds `scanlinesRequested`, `scanlinesAdvanced`, `scanline` (`framesAdvanced` stays 0 for steps under a frame).
+- `get_access_summary` rows add `execBytes`, `execFirstByte` and `hottest {offset, exec}`; `exec` is the sum of per-byte counters and the emulator marks only the opcode byte of each executed instruction (T-15).
+
+### Rewind (MCP-28, T-13, T-14)
+- `rewind {seconds | frames, allowPartial?}` jumps back with the instant 10 s/1 min history steps and plays the surplus forward, so it lands exactly `seconds * fps` frames earlier. Reply `{requestedFrames, framesRewound, frameBefore, frameAfter, jumps[], forwardFrames, partial, rewindAvailableFrames?}`. Errors: `rewind_disabled`, `rewind_unavailable`, `rewind_insufficient_history` (all with `rewindAvailableFrames`; the state is restored unless `allowPartial`).
+- Cause of the old behaviour: the sub-10-second path started the hold-to-rewind mode and never ended it, which left the core in rewind mode (slow frames, dead Lua callbacks, unpredictable distance).
+
+### Memory and labels (MCP-24, MCP-25, MCP-30)
+- `read_word` -> `{memoryType, address, value, hex}`; `write_word` -> `{..., value, hex, readBack, verified}`; `write_memory` -> `{memoryType, address, written, bytes, verified, value?, hex?}` (value/hex for up to 4 bytes, little endian); `get_label_address` -> `{label, address, hex, memoryType, cpuAddress, cpuAddressHex, length}`. `read_memory format:"bytes"` is `{memoryType, address, length, truncated, bytes[]}`.
+- `get_breakpoint_hits` rows add `memType`, `absType`, `absOffset`, `wramOffset | prgOffset | sramOffset` and the same for the pc (`pcPrgOffset`, `pcWramOffset`). Breakpoints on `snesMemory` report the bank alias the code used; use `snesPrgRom`/`snesWorkRam` for offsets.
+- `set_breakpoints` accepts `action: "halt"` as an alias of `break`.
+
+### Events and scripts (MCP-23, MCP-29, T-08)
+- `breakpoint_hit` events are sent only for halting breakpoints and exception breaks (with `source`); step completions and the internal temporary breakpoints are no longer events. Count/log breakpoints send their own `breakpoint_hit` events with `breakpointId`, `name`, `count`, `newHits`.
+- `emu.mcp.done()` (and `kit.finish`) may be called at script load: the run ends at once with `script_done`.
+- `run_until` accepts `includes` as a top-level argument.
+- `mesen_kit`: `kit.wramOffset(addr)`. `iog_kit`/`warp` recipe: `quick = true` (write `sceneNext` only; also used automatically for a scene other than the default without x/y).
 
 ### Notes
 - Lua note: `emu.createSavestate` works only inside an exec memory callback.

@@ -7,7 +7,11 @@
 --   $09A2/$09A4 playerX/Y  $0ACA/$0ACE maxHp/hp
 --
 -- iog.warp{ scene=0x0A, x=0x60, y=0x370, facing=3, scroll=0x4430, flags={0x3F}, delay=120,
---           dismissBanner=true, onReady=function(info) end }
+--           dismissBanner=true, quick=false, onReady=function(info) end }
+--   quick=true  writes only sceneNext (the scene's default spawn is used; warpDest* stay untouched). The event flags
+--               in `flags` are set first, then the scene and the banner are awaited. x, y, facing, scroll are ignored.
+--               It also works from the title screen (scene $FC) once the title is polling sceneNext (delay >= ~60 frames).
+--   If a scene other than the default (Edward's Castle) is given without x and y, quick is used automatically.
 -- iog.state() -> table with scene/player/hp/input mask.
 iog = iog or {}
 
@@ -40,6 +44,12 @@ function iog.warp(opts)
   for _, k in ipairs({ "scene", "x", "y", "facing", "scroll", "flags" }) do
     if opts[k] ~= nil then t[k] = opts[k] end
   end
+  local quick = opts.quick == true
+  if not quick and opts.target == nil and opts.scene ~= nil and opts.scene ~= iog.EDWARDS_CASTLE.scene
+     and (opts.x == nil or opts.y == nil) then
+    quick = true
+    emu.log("[iog.warp] no spawn coordinates for scene " .. string.format("%02X", opts.scene) .. ": using quick warp (default spawn)")
+  end
   local delay = opts.delay or 120
   local dismiss = opts.dismissBanner
   if dismiss == nil then dismiss = true end
@@ -53,10 +63,15 @@ function iog.warp(opts)
       waiting = function(m)
         if kit.frame - startFrame >= delay and kit.r16(a.sceneNext) == 0 then
           for _, id in ipairs(t.flags or {}) do iog.setEventFlag(id) end
-          kit.w16(a.warpX, t.x); kit.w16(a.warpY, t.y)
-          kit.w16(a.warpFacing, t.facing); kit.w16(a.warpScroll, t.scroll or 0)
-          kit.w16(a.sceneNext, t.scene)
-          emu.log(string.format("[iog.warp] staged scene %02X (%04X,%04X) at frame %d", t.scene, t.x, t.y, kit.frame))
+          if quick then
+            kit.w16(a.sceneNext, t.scene)
+            emu.log(string.format("[iog.warp] quick warp: staged scene %02X at frame %d", t.scene, kit.frame))
+          else
+            kit.w16(a.warpX, t.x or 0); kit.w16(a.warpY, t.y or 0)
+            kit.w16(a.warpFacing, t.facing or 0); kit.w16(a.warpScroll, t.scroll or 0)
+            kit.w16(a.sceneNext, t.scene)
+            emu.log(string.format("[iog.warp] staged scene %02X (%04X,%04X) at frame %d", t.scene, t.x or 0, t.y or 0, kit.frame))
+          end
           m:go("warping")
         end
       end,
@@ -95,6 +110,7 @@ function iog.warp(opts)
         s.frame = kit.frame
         s.ok = m.failed == nil
         s.error = m.failed
+        s.quick = quick
         emu.log(string.format("[iog.warp] READY scene=%04X pos=(%04X,%04X) hp=%d/%d inputMask=%04X frame=%d",
           s.scene, s.x, s.y, s.hp, s.maxHp, s.inputMask, s.frame))
         m:stop()

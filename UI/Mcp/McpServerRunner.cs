@@ -23,8 +23,8 @@ namespace Mesen.Mcp
 		public int? SaveStateSlot { get; set; }
 		/// <summary>Sandbox folder for emu.mcp.writeFile and relative output paths (--mcp-results-dir).</summary>
 		public string? ResultsDir { get; set; }
-		/// <summary>Folder with the Lua kit modules and recipes (--mcp-lib-dir).</summary>
-		public string? LibDir { get; set; }
+		/// <summary>Extra folders with Lua kit modules and recipes (--mcp-lib-dir, repeatable or ';'-separated). Searched after the server's own lib folder.</summary>
+		public List<string> LibDirs { get; } = new List<string>();
 	}
 
 	public static class McpServerRunner
@@ -182,7 +182,9 @@ namespace Mesen.Mcp
 				} else if(normalized.StartsWith("mcp-results-dir=", StringComparison.OrdinalIgnoreCase)) {
 					options.ResultsDir = ResolvePath(normalized.Substring("mcp-results-dir=".Length));
 				} else if(normalized.StartsWith("mcp-lib-dir=", StringComparison.OrdinalIgnoreCase)) {
-					options.LibDir = ResolvePath(normalized.Substring("mcp-lib-dir=".Length));
+					foreach(string part in normalized.Substring("mcp-lib-dir=".Length).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) {
+						options.LibDirs.Add(ResolvePath(part.Trim('"')));
+					}
 				} else if(normalized.StartsWith("mcp-savestateslot=", StringComparison.OrdinalIgnoreCase)) {
 					if(int.TryParse(normalized.Substring("mcp-savestateslot=".Length), out int slot) && slot >= 1 && slot <= 10) {
 						options.SaveStateSlot = slot;

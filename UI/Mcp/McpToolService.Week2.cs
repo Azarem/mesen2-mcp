@@ -31,7 +31,7 @@ namespace Mesen.Mcp
 
 		private List<InteropBreakpoint> _interopBps = new List<InteropBreakpoint>();
 		private string? _resultsDir;
-		private string? _libDir;
+		private List<string> _libDirs = new List<string>();
 		private bool _libDirResolved;
 		private readonly Dictionary<string, long> _filesWritten = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 		private static readonly Regex ModuleNameRegex = new Regex("^[A-Za-z0-9_\\-]+$", RegexOptions.Compiled);
@@ -139,14 +139,15 @@ namespace Mesen.Mcp
 				"Run until a condition holds, a breakpoint hits, maxFrames pass or timeoutMs elapses. condition is one of: " +
 				"{type:\"memoryEquals\", memType?, address, size?(1-4, little endian), value, mask?} checked at the end of every frame (memType default workRam); " +
 				"{type:\"pcEquals\", pc} (number or \"BB:AAAA\") using a temporary exec breakpoint; " +
-				"{type:\"lua\", expr, includes?} a Lua expression evaluated at the end of every frame (kit helpers available when included); " +
+				"{type:\"lua\", expr, includes?} (includes may also be given as a top-level argument) a Lua expression evaluated at the end of every frame (kit helpers available when included); " +
 				"{type:\"breakpoint\"} runs until a configured breakpoint hits. " +
 				"Returns stopReason (condition|breakpoint|done=maxFrames reached|timeout|error), met, framesAdvanced, frame, framesPerSecond and the CPU registers.",
 				ObjectSchema(
 					("condition", AnyObjectSchema("Stop condition, see description"), true),
 					("maxFrames", IntegerSchema("Give up after this many frames (default 600)"), false),
 					("timeoutMs", IntegerSchema("Give up after this many milliseconds"), false),
-					("turbo", BooleanSchema("Run without the frame limiter"), false)
+					("turbo", BooleanSchema("Run without the frame limiter"), false),
+					("includes", StringArraySchema("Kit modules for a lua condition (same as condition.includes)"), false)
 				), ToolRunUntil);
 		}
 
@@ -281,7 +282,7 @@ namespace Mesen.Mcp
 							"local ok, met = pcall(function() return " + luaExpr + " end) " +
 							"if not ok then fired = true emu.mcp.result({met = false, error = tostring(met)}) emu.mcp.done() return end " +
 							"if met then fired = true emu.mcp.result({met = true}) emu.mcp.done() end end, emu.eventType.endFrame)";
-						LoadScriptInternal(scriptName, code, true, GetStringList(condition, "includes"), cpu, out _);
+						LoadScriptInternal(scriptName, code, true, GetStringList(args, "includes") ?? GetStringList(condition, "includes"), cpu, out _);
 						HarvestScriptLogs(cpu);
 						outcome = RunFrames(cpu, maxFrames, timeoutMs, () => _logStore.IsDone(scriptName));
 					} else {
@@ -330,11 +331,32 @@ namespace Mesen.Mcp
 		private string ResultsDir {
 			get {
 				if(_resultsDir == null) {
-					string dir = _options.ResultsDir ?? Path.Combine(ConfigManager.HomeFolder, "McpResults");
+					string dir = _options.ResultsDir ?? DefaultResultsDir();
 					_resultsDir = Path.GetFullPath(dir);
 				}
 				return _resultsDir;
 			}
+		}
+
+		/// <summary>
+		/// Default results folder: per-user local app data (never a cloud-synced Documents folder, which made result files
+		/// disappear under OneDrive redirection).
+		/// </summary>
+		private static string DefaultResultsDir()
+		{
+			string baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+			if(string.IsNullOrWhiteSpace(baseDir)) {
+				baseDir = Path.GetTempPath();
+			}
+			return Path.Combine(baseDir, "Mesen2Mcp", "results");
+		}
+
+		private static bool LooksCloudSynced(string path)
+		{
+			return path.Contains("OneDrive", StringComparison.OrdinalIgnoreCase) ||
+				path.Contains("Dropbox", StringComparison.OrdinalIgnoreCase) ||
+				path.Contains("iCloud", StringComparison.OrdinalIgnoreCase) ||
+				path.Contains("Google Drive", StringComparison.OrdinalIgnoreCase);
 		}
 
 		/// <summary>Resolves a relative name inside the results folder; rejects anything that could leave it.</summary>
@@ -402,33 +424,59 @@ namespace Mesen.Mcp
 		// MCP-15: kit modules, recipes
 		// ---------------------------------------------------------------------------------------------
 
-		private string? LibDir {
+		/// <summary>All lib folders in search order: the server's own first, then the --mcp-lib-dir folders.</summary>
+		private IReadOnlyList<string> LibDirs {
 			get {
 				if(!_libDirResolved) {
 					_libDirResolved = true;
-					_libDir = FindLibDir();
+					_libDirs = FindLibDirs();
 				}
-				return _libDir;
+				return _libDirs;
 			}
 		}
 
-		private string? FindLibDir()
+		/// <summary>First lib folder (kept for the legacy single-folder fields).</summary>
+		private string? LibDir => LibDirs.Count > 0 ? LibDirs[0] : null;
+
+		private List<string> FindLibDirs()
 		{
-			List<string> candidates = new List<string>();
-			if(!string.IsNullOrWhiteSpace(_options.LibDir)) {
-				candidates.Add(_options.LibDir!);
+			List<string> result = new List<string>();
+			void Add(string path)
+			{
+				string full = Path.GetFullPath(path);
+				if(Directory.Exists(full) && !result.Contains(full, StringComparer.OrdinalIgnoreCase)) {
+					result.Add(full);
+				}
 			}
-			candidates.Add(Path.Combine(AppContext.BaseDirectory, "lua", "lib"));
+
+			//The server's own folder: shipped next to the host or in a source checkout.
+			List<string> builtIn = new List<string>();
+			builtIn.Add(Path.Combine(AppContext.BaseDirectory, "lua", "lib"));
 			string? dir = AppContext.BaseDirectory;
 			for(int i = 0; i < 8 && !string.IsNullOrEmpty(dir); i++) {
-				candidates.Add(Path.Combine(dir, "tools", "lua", "lib"));
+				builtIn.Add(Path.Combine(dir, "tools", "lua", "lib"));
 				dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
 			}
-			candidates.Add(Path.Combine(Program.OriginalFolder, "tools", "lua", "lib"));
+			builtIn.Add(Path.Combine(Program.OriginalFolder, "tools", "lua", "lib"));
+			string? own = builtIn.FirstOrDefault(Directory.Exists);
+			if(own != null) {
+				Add(own);
+			}
 
-			foreach(string candidate in candidates) {
-				if(Directory.Exists(candidate)) {
-					return Path.GetFullPath(candidate);
+			//Project folders (--mcp-lib-dir) come after, so a project cannot shadow the shipped kit by accident.
+			foreach(string extra in _options.LibDirs) {
+				Add(extra);
+			}
+			return result;
+		}
+
+		/// <summary>Finds a file inside the lib folders (first match wins). subFolder is "" for kit modules and "recipes" for recipes.</summary>
+		private string? FindLibFile(string subFolder, string name)
+		{
+			foreach(string lib in LibDirs) {
+				string path = Path.Combine(lib, subFolder, name + ".lua");
+				if(File.Exists(path)) {
+					return path;
 				}
 			}
 			return null;
@@ -489,13 +537,12 @@ namespace Mesen.Mcp
 			if(!ModuleNameRegex.IsMatch(module)) {
 				throw new McpToolException("invalid_include", $"'{module}' is not a valid kit module name.");
 			}
-			string? lib = LibDir;
-			if(lib == null) {
-				throw new McpToolException("no_lib_dir", "The Lua lib folder was not found. Start the server with --mcp-lib-dir=<folder> or ship tools/lua/lib next to the host.");
+			if(LibDirs.Count == 0) {
+				throw new McpToolException("no_lib_dir", "No Lua lib folder was found. Ship tools/lua/lib next to the host or start the server with --mcp-lib-dir=<folder>[;<folder>].");
 			}
-			string path = Path.Combine(lib, module + ".lua");
-			if(!File.Exists(path)) {
-				throw new McpToolException("unknown_include", $"Kit module '{module}' was not found in {lib}.");
+			string? path = FindLibFile("", module);
+			if(path == null) {
+				throw new McpToolException("unknown_include", $"Kit module '{module}' was not found in: {string.Join("; ", LibDirs)}.");
 			}
 			return File.ReadAllText(path);
 		}
@@ -578,37 +625,49 @@ namespace Mesen.Mcp
 
 		private McpToolResult ToolListRecipes(JsonElement _)
 		{
-			string? lib = LibDir;
 			JsonArray modules = new JsonArray();
 			JsonArray recipes = new JsonArray();
+			HashSet<string> seenModules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+			HashSet<string> seenRecipes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-			if(lib != null) {
+			foreach(string lib in LibDirs) {
 				foreach(string file in Directory.GetFiles(lib, "*.lua").OrderBy(f => f, StringComparer.OrdinalIgnoreCase)) {
+					string moduleName = Path.GetFileNameWithoutExtension(file);
+					if(!seenModules.Add(moduleName)) {
+						continue;
+					}
 					Dictionary<string, string> header = ParseLuaHeader(File.ReadAllText(file));
 					modules.Add((JsonNode)new JsonObject() {
-						["name"] = Path.GetFileNameWithoutExtension(file),
+						["name"] = moduleName,
 						["description"] = header.GetValueOrDefault("description"),
-						["requires"] = new JsonArray(SplitList(header.GetValueOrDefault("requires")).Select(r => (JsonNode?)r).ToArray())
+						["requires"] = new JsonArray(SplitList(header.GetValueOrDefault("requires")).Select(r => (JsonNode?)r).ToArray()),
+						["dir"] = lib
 					});
 				}
 
 				string recipeDir = Path.Combine(lib, "recipes");
 				if(Directory.Exists(recipeDir)) {
 					foreach(string file in Directory.GetFiles(recipeDir, "*.lua").OrderBy(f => f, StringComparer.OrdinalIgnoreCase)) {
+						string recipeName = Path.GetFileNameWithoutExtension(file);
+						if(!seenRecipes.Add(recipeName)) {
+							continue;
+						}
 						Dictionary<string, string> header = ParseLuaHeader(File.ReadAllText(file));
 						recipes.Add((JsonNode)new JsonObject() {
-							["name"] = Path.GetFileNameWithoutExtension(file),
+							["name"] = recipeName,
 							["description"] = header.GetValueOrDefault("description"),
 							["includes"] = new JsonArray(SplitList(header.GetValueOrDefault("includes")).Select(r => (JsonNode?)r).ToArray()),
 							["defaultFrames"] = header.TryGetValue("frames", out string? frames) && int.TryParse(frames, out int f) ? JsonValue.Create(f) : null,
-							["args"] = header.GetValueOrDefault("args")
+							["args"] = header.GetValueOrDefault("args"),
+							["dir"] = lib
 						});
 					}
 				}
 			}
 
 			return Json(new JsonObject() {
-				["libDir"] = lib,
+				["libDir"] = LibDir,
+				["libDirs"] = new JsonArray(LibDirs.Select(d => (JsonNode?)d).ToArray()),
 				["resultsDir"] = ResultsDir,
 				["modules"] = modules,
 				["recipes"] = recipes
@@ -621,10 +680,12 @@ namespace Mesen.Mcp
 			if(!ModuleNameRegex.IsMatch(name)) {
 				throw new McpToolException("unknown_recipe", $"'{name}' is not a valid recipe name.");
 			}
-			string? lib = LibDir ?? throw new McpToolException("no_lib_dir", "The Lua lib folder was not found.");
-			string path = Path.Combine(lib, "recipes", name + ".lua");
-			if(!File.Exists(path)) {
-				throw new McpToolException("unknown_recipe", $"Recipe '{name}' was not found. Use list_recipes.");
+			if(LibDirs.Count == 0) {
+				throw new McpToolException("no_lib_dir", "No Lua lib folder was found. Ship tools/lua/lib next to the host or start the server with --mcp-lib-dir=<folder>[;<folder>].");
+			}
+			string? path = FindLibFile("recipes", name);
+			if(path == null) {
+				throw new McpToolException("unknown_recipe", $"Recipe '{name}' was not found in any <libDir>/recipes folder ({string.Join("; ", LibDirs)}). Use list_recipes.");
 			}
 
 			string source = File.ReadAllText(path);

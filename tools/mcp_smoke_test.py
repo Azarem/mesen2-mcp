@@ -146,11 +146,31 @@ def main():
         required = {
             "load_rom", "get_rom_info", "advance_frame", "read_memory", "write_memory",
             "set_breakpoints", "get_disassembly", "take_screenshot", "run_script",
-            "get_capabilities", "self_test", "stop",
+            "get_capabilities", "self_test", "stop", "rewind", "get_server_status",
         }
         missing = sorted(required - names)
         if missing:
             raise RuntimeError(f"tools/list missing required tools: {missing}")
+
+        # get_capabilities must work before any ROM is loaded (MCP-30) and report the effective folders (MCP-22).
+        send_message(
+            proc.stdin,
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "get_capabilities", "arguments": {}},
+            },
+        )
+        cap_result = read_response_for_id(proc.stdout, 4)
+        if cap_result.get("isError"):
+            raise RuntimeError(f"get_capabilities failed without a ROM: {cap_result}")
+        cap = json.loads(cap_result["content"][0]["text"])
+        for key in ("serverVersion", "resultsDir", "libDirs", "romLoaded"):
+            if key not in cap:
+                raise RuntimeError(f"get_capabilities misses '{key}': {sorted(cap)}")
+        if not cap["libDirs"]:
+            raise RuntimeError("get_capabilities reports no lua lib folder (is lua/lib next to the host?)")
 
         send_message(
             proc.stdin,

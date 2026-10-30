@@ -98,7 +98,7 @@ local function enc(v, d)
 end
 emu.mcp = emu.mcp or {}
 emu.mcp.result = function(v) emu.log('@@MCP_RESULT@@' .. enc(v, 0)) end
-emu.mcp.done = function() emu.log('@@MCP_DONE@@') emu.breakExecution() end
+emu.mcp.done = function() emu.log('@@MCP_DONE@@') pcall(emu.breakExecution) end
 emu.mcp.writeFile = function(name, text, append)
   if type(name) ~= 'string' or name == '' then return nil, 'name must be a non-empty string' end
   if name:find('..', 1, true) or name:find('^[/\\]') or name:find('^%a:') or name:find('[%c<>|"?*]') then

@@ -6,7 +6,8 @@
 --   kit.onFrame(fn)               fn(frame) runs at every end of frame; returns a handle for kit.off
 --   kit.machine{ start = "a", states = { a = function(m) ... m:go("b") end, ... } }
 --   kit.pulse(buttons, framesDown, framesUp)   toggles buttons from an inputPolled callback until kit.stopPulse()
---   kit.finish(result)            emu.mcp.result(result) + emu.mcp.done()
+--   kit.finish(result)            emu.mcp.result(result) + emu.mcp.done() (also allowed at script load: the run ends at once)
+--   kit.wramOffset(addr)          SNES: WRAM offset of the CPU address a callback received ($7E/$7F banks, $0000-$1FFF of banks $00-$3F/$80-$BF), or nil
 kit = kit or {}
 
 local function defaultMem()
@@ -112,6 +113,16 @@ function kit.topCounts(counts, limit)
     for i = #list, limit + 1, -1 do list[i] = nil end
   end
   return list
+end
+
+-- Callbacks registered on snesMemory (or reached through a mirror) report the CPU address the code used:
+-- 0x81065A, 0x7E065A and 0x00065A are all WRAM offset 0x065A. Returns the 17-bit WRAM offset, or nil if addr is not WRAM.
+function kit.wramOffset(addr)
+  local bank, lo = (addr >> 16) & 0xFF, addr & 0xFFFF
+  if bank == 0x7E then return lo end
+  if bank == 0x7F then return 0x10000 + lo end
+  if (bank & 0x7F) <= 0x3F and lo < 0x2000 then return lo end
+  return nil
 end
 
 function kit.finish(result)

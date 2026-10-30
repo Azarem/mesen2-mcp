@@ -45,7 +45,7 @@ namespace Mesen.Mcp
 		{
 			AddTool(tools, "subscribe_events",
 				"Choose which server events are sent as notifications/mesen/event. Types and payloads: " +
-				"breakpointHit {event:breakpoint_hit, breakpointId, cpuType, address, value, memoryType, operationType, callbackType; count/log breakpoints add action, count, newHits, frame}; " +
+				"breakpointHit {event:breakpoint_hit, breakpointId, source, cpuType, address, value, memoryType, operationType, callbackType} for halting breakpoints and exception breaks only (step completions are not events); count/log breakpoints send {event:breakpoint_hit, breakpointId, action, name, count, newHits, frame} when read after a harvest; " +
 				"romLoaded {event:game_loaded}; stateLoaded {event:state_loaded, path}; frameEnd {event:frame_end, frame} (at most every frameEvery frames, sent when a stepping call returns); " +
 				"scriptLog {event:script_log, nextSeq} (new script log rows); error {event:error, tool, message}; gamePaused, gameResumed, emulationStopped. " +
 				"Default (never subscribed): breakpointHit, romLoaded, gamePaused, gameResumed, emulationStopped. An empty list disables all events.",
@@ -56,8 +56,19 @@ namespace Mesen.Mcp
 				ToolSubscribeEvents);
 
 			AddTool(tools, "get_capabilities",
-				"Report the runtime: server and Mesen version, CPU/debug features, tools, the Lua emu.* functions, flags (video/audio/input/scriptIo), limits, results/lib folders and the last self_test result.",
+				"Report the runtime: server and Mesen version, CPU/debug features, tools, the Lua emu.* functions, flags (video/audio/input/scriptIo), limits, the effective results folder (resultsDir) and lib folders (libDirs), the host path and the last self_test result. Works before any ROM is loaded (romLoaded:false, CPU fields omitted).",
 				EmptySchema(), ToolGetCapabilitiesEx);
+
+			AddTool(tools, "get_server_status",
+				"Watchdog view of the server: whether a previous call is still stuck (busy), the last 5 tool calls with their duration and outcome, uptime, romLoaded and paused. Never blocked by a stuck call. " +
+				"Every tool call has a watchdog (timeoutMs + 15 s, or 120 s by default): a call that exceeds it returns {error:{code:\"timeout\"}} and pauses the emulator; calls made while it is still running return {error:{code:\"busy\"}}.",
+				EmptySchema(), ToolGetServerStatus);
+
+			if(Environment.GetEnvironmentVariable("MESEN_MCP_TEST_TOOLS") == "1") {
+				AddTool(tools, "__test_hang", "Test hook: block for ms milliseconds (watchdog tests).",
+					ObjectSchema(("ms", IntegerSchema("Milliseconds to block"), false), ("timeoutMs", IntegerSchema("Watchdog budget"), false)), ToolTestHang);
+				NoRomTools.Add("__test_hang");
+			}
 
 			AddTool(tools, "self_test",
 				"Run the capability matrix on the loaded ROM and return pass/fail per feature: memory write/read/exec callbacks, emu.write/read, setInput in inputPolled, Lua savestate round trip, " +
@@ -189,7 +200,7 @@ namespace Mesen.Mcp
 			}
 			node["tools"] = toolRows;
 
-			JsonArray functions = GetLuaFunctionNames();
+			JsonArray functions = node["romLoaded"]?.GetValue<bool>() == true ? GetLuaFunctionNames() : new JsonArray();
 			node["lua"] = new JsonObject() {
 				["functions"] = functions.DeepClone(),
 				["emuMcp"] = new JsonArray((JsonNode?)"result", (JsonNode?)"done", (JsonNode?)"writeFile"),

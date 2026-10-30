@@ -6,6 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>MesenMcpHost</AssemblyName>
     <RootNamespace>MesenMcpHost</RootNamespace>
+    <!-- Always build to bin/<Configuration>/net8.0/ (even when a RuntimeIdentifier is passed), so the path registered in mcp.json is the current build. -->
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
     <!-- One place for the version: the mcp-version.txt file at the repo root (not named VERSION: on case-insensitive file systems the C++ standard header <version> would resolve to it). Bump it to publish a release. -->
     <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\mcp-version.txt').Trim())</Version>
   </PropertyGroup>

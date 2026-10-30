@@ -85,7 +85,7 @@ def main():
 
         # NMI vector (native mode, bank 0 vector at $00FFEA)
         err, text, _ = c.call("read_word", address=0xFFEA)
-        nmi = int(text.split()[0], 16)
+        nmi = json.loads(text)["value"]
         err, _, _ = c.call("set_breakpoints", breakpoints=[{"callbackType": "exec", "startAddress": nmi}])
         err, br = call_json(c, "advance_frame", frames=5)
         check("advance_frame reports breakpoint",
