@@ -34,7 +34,7 @@ The complete tool reference (all 80 tools with parameters) is in [README.md](REA
 - `get_rom_info`: implemented
 - `pause`: implemented
 - `resume`: implemented
-- `reset`: implemented
+- `reset`: implemented (modes soft|power, 0.6.0)
 - `stop`: implemented (also exits MCP process)
 - `get_timing_info`: implemented
 - `advance_frame`: implemented

@@ -180,10 +180,11 @@ namespace Mesen.Mcp
 
 			AddTool(tools, "pause", "Pause emulation.", EmptySchema(), _ => { EmuApi.Pause(); return McpToolResult.Text("Emulation paused."); });
 			AddTool(tools, "resume", "Resume emulation.", EmptySchema(), _ => { DebugApi.ResumeExecution(); EmuApi.Resume(); return McpToolResult.Text("Emulation resumed."); });
-			AddTool(tools, "reset", "Soft reset emulation.", EmptySchema(), _ => {
-				EmuApi.ExecuteShortcut(new ExecuteShortcutParams() { Shortcut = EmulatorShortcut.Reset });
-				return McpToolResult.Text("Emulation reset.");
-			});
+			AddTool(tools, "reset",
+				"Reset the console and stop before the first boot instruction. mode soft (default) is the console's reset button (WRAM is kept); mode power is a power cycle (ROM reloaded, RAM re-initialized, frame counter back to 0, like a cold boot). " +
+				"Returns the CPU state at the reset vector. A power cycle builds a new debugger, so loaded scripts (and Lua-backed log/count breakpoints) are dropped (scriptsDropped); native breakpoints and labels are re-applied. " +
+				"Load a script afterwards (or use run_script with fromReset) to watch the boot code.",
+				ObjectSchema(("mode", StringSchema("soft (default) or power"), false)), ToolReset);
 			AddTool(tools, "stop", "Stop emulation and exit MCP server.", ObjectSchema(("exitCode", IntegerSchema("Exit code"), false)), ToolStop);
 			AddTool(tools, "get_timing_info", "Get frame, scanline and cycle timing info.", EmptySchema(), ToolGetTimingInfo);
 			AddTool(tools, "rewind",
@@ -294,7 +295,7 @@ namespace Mesen.Mcp
 			};
 		}
 
-		private JsonObject? LoadRomInternal(string romPath, string? saveStatePath, int? saveStateSlot, bool requireRomMatch, bool lenientWhenNoSidecar)
+		private JsonObject? LoadRomInternal(string romPath, string? saveStatePath, int? saveStateSlot, bool requireRomMatch, bool lenientWhenNoSidecar, bool resume = true)
 		{
 			if(!File.Exists(romPath)) {
 				throw new FileNotFoundException("ROM file not found.", romPath);
@@ -328,7 +329,9 @@ namespace Mesen.Mcp
 			}
 
 			RegisterSlotForLoadedRom(romPath);
-			EmuApi.Resume();
+			if(resume) {
+				EmuApi.Resume();
+			}
 			return stateInfo;
 		}
 
@@ -726,7 +729,13 @@ namespace Mesen.Mcp
 					RaiseEvent(breakPayload);
 					break;
 
+				case ConsoleNotificationType.GameReset:
+					OnResetNotification(false);
+					break;
 				case ConsoleNotificationType.GameLoaded:
+					if(e.Parameter != IntPtr.Zero && System.Runtime.InteropServices.Marshal.PtrToStructure<GameLoadedEventParams>(e.Parameter).IsPowerCycle) {
+						OnResetNotification(true);
+					}
 					RaiseEvent(new JsonObject() { ["event"] = "game_loaded" });
 					break;
 				case ConsoleNotificationType.GamePaused:

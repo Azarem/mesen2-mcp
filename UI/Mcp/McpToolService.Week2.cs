@@ -117,6 +117,7 @@ namespace Mesen.Mcp
 					("timeoutMs", IntegerSchema("Give up after this many milliseconds"), false),
 					("turbo", BooleanSchema("Run without the frame limiter"), false),
 					("unloadAfter", BooleanSchema("Unload the script afterwards (default true)"), false),
+					("fromReset", StringSchema("Start from a reset: power (cold boot, RAM re-initialized, frame counter 0; true also means power) or soft (reset button, WRAM kept). The script is loaded before the first boot instruction, so it sees all of the boot code. A power cycle unloads other scripts."), false),
 					("maxLog", IntegerSchema("Maximum log rows returned (default 500)"), false)
 				), ToolRunRecipe);
 
@@ -131,6 +132,7 @@ namespace Mesen.Mcp
 					("turbo", BooleanSchema("Run without the frame limiter"), false),
 					("unloadAfter", BooleanSchema("Unload the script afterwards (default true)"), false),
 					("maxLog", IntegerSchema("Maximum log rows returned (default 500)"), false),
+					("fromReset", StringSchema("Start from a reset: power (cold boot, RAM re-initialized, frame counter 0; true also means power) or soft (reset button, WRAM kept). The script is loaded before the first boot instruction, so it sees all of the boot code. A power cycle unloads other scripts."), false),
 					("includes", StringArraySchema("Kit modules to load first, for example [\"mesen_kit\"]"), false)
 				), ToolRunScript);
 
@@ -785,7 +787,7 @@ namespace Mesen.Mcp
 			bool unloadAfter = GetOptionalBool(args, "unloadAfter") ?? true;
 			int maxLog = Math.Clamp(GetOptionalInt(args, "maxLog") ?? 500, 1, ScriptLogRingSize);
 
-			JsonObject node = RunScriptCore("recipe_" + name, code, includes, frames, timeoutMs, turbo, unloadAfter, maxLog);
+			JsonObject node = RunScriptCore("recipe_" + name, code, includes, frames, timeoutMs, turbo, unloadAfter, maxLog, ParseFromReset(args));
 			node["recipe"] = name;
 			return Json(node, node["stopReason"]?.GetValue<string>() == "timeout");
 		}
@@ -800,16 +802,41 @@ namespace Mesen.Mcp
 			bool unloadAfter = GetOptionalBool(args, "unloadAfter") ?? true;
 			int maxLog = Math.Clamp(GetOptionalInt(args, "maxLog") ?? 500, 1, ScriptLogRingSize);
 
-			JsonObject node = RunScriptCore(name, code, GetStringList(args, "includes"), frames, timeoutMs, turbo, unloadAfter, maxLog);
+			JsonObject node = RunScriptCore(name, code, GetStringList(args, "includes"), frames, timeoutMs, turbo, unloadAfter, maxLog, ParseFromReset(args));
 			return Json(node, node["stopReason"]?.GetValue<string>() == "timeout");
 		}
 
-		private JsonObject RunScriptCore(string name, string code, IReadOnlyList<string>? includes, int frames, int timeoutMs, bool turbo, bool unloadAfter, int maxLog)
+		/// <summary>fromReset: true or "power" = cold boot, "soft" = reset button, absent/false = none.</summary>
+		private static string? ParseFromReset(JsonElement args)
+		{
+			if(args.ValueKind != JsonValueKind.Object || !args.TryGetProperty("fromReset", out JsonElement value)) {
+				return null;
+			}
+			switch(value.ValueKind) {
+				case JsonValueKind.True: return "power";
+				case JsonValueKind.String:
+					string text = (value.GetString() ?? "").Trim().ToLowerInvariant();
+					if(text == "" || text == "false" || text == "none") {
+						return null;
+					}
+					if(text == "true") {
+						return "power";
+					}
+					if(text == "power" || text == "soft") {
+						return text;
+					}
+					throw new McpToolException("invalid_argument", "fromReset must be \"power\", \"soft\" or a boolean.");
+				default: return null;
+			}
+		}
+
+		private JsonObject RunScriptCore(string name, string code, IReadOnlyList<string>? includes, int frames, int timeoutMs, bool turbo, bool unloadAfter, int maxLog, string? fromReset = null)
 		{
 			CpuType cpu = GetPrimaryCpuType();
 			EnsurePaused(2000);
 
 			Dictionary<string, long> filesBefore = new Dictionary<string, long>(_filesWritten, StringComparer.OrdinalIgnoreCase);
+			JsonObject? resetInfo = fromReset != null ? ResetConsole(fromReset == "power") : null;
 			long startSeq = _logStore.NextSeq;
 			int id = LoadScriptInternal(name, code, true, includes, cpu, out _);
 			HarvestScript(name, id, cpu);
@@ -845,6 +872,9 @@ namespace Mesen.Mcp
 			node["name"] = name;
 			node["scriptId"] = id;
 			node["unloaded"] = unloadAfter;
+			if(resetInfo != null) {
+				node["reset"] = resetInfo;
+			}
 			node["log"] = McpScriptLogStore.ToJson(log);
 			node["hasResult"] = rawResult != null;
 			node["result"] = ParseResult(rawResult);

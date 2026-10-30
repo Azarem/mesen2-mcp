@@ -243,6 +243,33 @@ def main():
             check("server recovers when the stuck call ends", not err and "value" in ok, str(ok)[:200])
         except Exception as ex:  # noqa: BLE001
             check("watchdog test ran", False, repr(ex))
+
+        # ---- T-42 boot from a reset ----------------------------------------------------------------
+        boot_code = ('local ex, wr, first = 0, 0, nil '
+                     'emu.addMemoryCallback(function(a) ex = ex + 1 if not first then first = a end end, emu.callbackType.exec, 0, 0xFFFFFF) '
+                     'emu.addMemoryCallback(function() wr = wr + 1 end, emu.callbackType.write, 0x7E0000, 0x7E1FFF) '
+                     'emu.addEventCallback(function() emu.mcp.result({exec = ex, writes = wr, first = first}) emu.mcp.done() end, emu.eventType.endFrame)')
+        err, lr = call_json(c, "load_rom", path=args.rom, paused=True)
+        boot = lr.get("boot", {})
+        check("load_rom paused stops at frame 0 before the first instruction", not err and lr.get("paused") is True and boot.get("frameAfter") == 0 and boot.get("paused") is True and boot.get("cpu", {}).get("pc24") is not None, str(lr)[:400])
+        err, t0 = call_json(c, "get_timing_info")
+        check("emulation stays paused after load_rom paused", t0.get("frameCount") == 0, str(t0.get("frameCount")))
+        reset_vec = boot.get("cpu", {}).get("pc24")
+        err, b1 = call_json(c, "run_script", code=boot_code, frames=1, turbo=True)
+        res = b1.get("result") or {}
+        check("script after load_rom paused sees the boot code", not err and res.get("exec", 0) > 100 and res.get("writes", 0) > 0 and res.get("first") == reset_vec, f"{res} reset vector {reset_vec}")
+        err, b2 = call_json(c, "run_script", code=boot_code, frames=1, turbo=True, fromReset="power")
+        res2 = b2.get("result") or {}
+        check("run_script fromReset power restarts at frame 0", not err and b2.get("reset", {}).get("frameAfter") == 0 and res2.get("first") == reset_vec and res2.get("exec") == res.get("exec"), f"{res2} {str(b2.get('reset'))[:200]}")
+        call_json(c, "advance_frame", frames=300, turbo=True)
+        err, before = call_json(c, "get_timing_info")
+        err, b3 = call_json(c, "run_script", code=boot_code, frames=1, turbo=True, fromReset="soft")
+        res3 = b3.get("result") or {}
+        check("run_script fromReset soft keeps the frame counter", not err and b3.get("reset", {}).get("mode") == "soft" and b3.get("reset", {}).get("frameAfter", 0) >= before.get("frameCount", 1) and res3.get("first") == reset_vec, f"{res3} {str(b3.get('reset'))[:200]}")
+        err, rs = call_json(c, "reset", mode="power")
+        check("reset power returns the boot state", not err and rs.get("frameAfter") == 0 and rs.get("paused") is True and rs.get("cpu", {}).get("pc24") == reset_vec, str(rs)[:300])
+        err, bad = call_json(c, "reset", mode="warm")
+        check("reset rejects an unknown mode", err, str(bad)[:200])
     finally:
         c.close()
 

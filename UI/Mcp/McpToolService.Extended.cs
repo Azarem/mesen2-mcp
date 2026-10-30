@@ -125,7 +125,8 @@ namespace Mesen.Mcp
 					("path", StringSchema("Absolute ROM path"), true),
 					("saveStatePath", StringSchema("Optional save-state file path"), false),
 					("saveStateSlot", IntegerSchema("Optional save-state slot 1-10"), false),
-					("requireRomMatch", BooleanSchema("Reject a save state whose sidecar names a different ROM (default true). A state without a sidecar is always loaded here."), false)
+					("requireRomMatch", BooleanSchema("Reject a save state whose sidecar names a different ROM (default true). A state without a sidecar is always loaded here."), false),
+					("paused", BooleanSchema("Do not leave the emulator running. Without a save state the console is power-cycled and stopped before its first boot instruction (frame 0, nothing has run), so the next run_script sees the whole boot code; with a save state it stays paused at that state. Default false: emulation resumes at once."), false)
 				),
 				ToolLoadRom);
 
@@ -319,13 +320,25 @@ namespace Mesen.Mcp
 			int? saveStateSlot = GetOptionalInt(args, "saveStateSlot");
 			bool requireRomMatch = GetOptionalBool(args, "requireRomMatch") ?? true;
 
-			JsonObject? stateInfo = LoadRomInternal(path, saveStatePath, saveStateSlot, requireRomMatch, lenientWhenNoSidecar: true);
+			bool paused = GetOptionalBool(args, "paused") ?? false;
+
+			JsonObject? stateInfo = LoadRomInternal(path, saveStatePath, saveStateSlot, requireRomMatch, lenientWhenNoSidecar: true, resume: !paused);
 
 			JsonObject node = new JsonObject() {
 				["loaded"] = true,
-				["message"] = "ROM loaded and emulation resumed.",
+				["message"] = paused ? "ROM loaded; emulation is paused." : "ROM loaded and emulation resumed.",
 				["rom"] = BuildRomIdentityNode()
 			};
+			if(paused) {
+				if(stateInfo == null) {
+					//The emulator started running as soon as the ROM loaded: a power cycle gets back to the first boot instruction.
+					node["boot"] = ResetConsole(true);
+				} else {
+					EmuApi.Pause();
+					EnsurePaused(5000);
+				}
+				node["paused"] = true;
+			}
 			if(stateInfo != null) {
 				node["state"] = stateInfo;
 			}

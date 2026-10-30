@@ -261,7 +261,7 @@ To publish: edit `mcp-version.txt`, commit, push to `master`.
 
 ## Lua scripting
 
-`run_script {code, frames, includes?}` pauses, loads the script, advances, collects the log and the result, and unloads it. `load_script` keeps a script running across calls. The server prepends a one-line prelude (user line numbers do not shift) that adds:
+`run_script {code, frames, includes?}` pauses, loads the script, advances, collects the log and the result, and unloads it. `load_script` keeps a script running across calls. To watch the boot code use `run_script {fromReset: "power"}` (or `"soft"`), or `load_rom {paused: true}` followed by a script call: the console is stopped before its first boot instruction, the script is loaded there, and `frames` counts from the boot (see "Boot from a reset" below). The server prepends a one-line prelude (user line numbers do not shift) that adds:
 
 - `emu.mcp.result(table)`: store a JSON result (about 90 KB limit; read it with `get_script_result`).
 - `emu.mcp.done()`: stop the run early (`stopReason: "script_done"`). It may be called inside a callback or at script load (the run then ends at once, `framesAdvanced: 0`); `kit.finish(result)` does the same after storing the result.
@@ -273,6 +273,12 @@ To publish: edit `mcp-version.txt`, commit, push to `master`.
 - The native log keeps the last 500 rows; the server reads it (4 MB buffer, so row length does not matter) between frame chunks into a 5000-row ring (`get_script_log`). A script that logs 500 or more rows between two harvests loses the oldest rows. Prefer a few compact lines, `emu.mcp.result` (about 90 KB), or `emu.mcp.writeFile` for bulk data.
 - `emu.mcp.writeFile` has no size limit besides disk space. The script queues the data and flushes about 48 KB per frame; `run_script` keeps advancing frames after the requested count (within `timeoutMs`) until the queue is empty, so a 600 KB file written in one call arrives complete. A call that returns `true` has queued the data. If the script is unloaded, or the run stops (`timeout`, breakpoint) before the queue is empty, the rest is lost, and the reply says so.
 - The `run_script` reply reports this: `writes` = `{writeCalls, bytesQueued, bytesWritten, bytesPending, complete, warnings[]}` and `logTruncated` (true when output was lost or data is still pending). `filesWritten` lists the bytes that were actually kept. `filesWritten` entries get `truncated: true` (with the bytes kept) when a file's data was cut off or is still queued. `list_scripts` shows `pendingWriteBytes` and `unload_script` returns `lostWriteBytes` when queued data is dropped.
+
+**Boot from a reset (T-42).** `load_rom` resumes emulation at once, so by the time a later call arrives the game has run on. Three ways to start at the boot code:
+- `load_rom {path, paused: true}` loads the ROM, power-cycles it and stops before the first instruction (`boot.frameAfter` is 0, `boot.cpu.pc24` is the reset vector). With a save state it just stays paused at that state.
+- `run_script {fromReset: "power"}` (also `true`) cold boots: RAM is re-initialized and the frame counter restarts at 0. `fromReset: "soft"` is the reset button: WRAM is kept and the frame counter continues. The reply has `reset` with the CPU state at the reset vector. `run_recipe` accepts it too.
+- `reset {mode: "soft"|"power"}` does the same on its own and leaves the console paused at the reset vector; load a script afterwards. (Before 0.6.0 `reset` did nothing.)
+A power cycle builds a new debugger, so scripts loaded earlier (and Lua-backed `log`/`count` breakpoints) are dropped (`scriptsDropped`); native breakpoints and labels are re-applied. A script sees the first instruction. The CPU address of `$4200` writes is `$80:4200` in this game (callbacks are per address, so register both `$004200` and `$804200`, or use a wide range).
 
 **Memory callbacks (T-36).** These behaviors are measured on the SNES core; the server does not change them:
 - The address a callback receives is the full effective CPU address (24-bit for banked accesses, for example `0x7E0036` or `0x80C000`), not an offset. A work-RAM callback registered on `$1000-$1FBF` can therefore receive addresses above `$FFFF` (long-addressed accesses in other banks that alias WRAM). Mask with `& 0xFFFF`, or use `kit.wramOffset(addr)` to get the WRAM offset (it returns `nil` for non-WRAM addresses).
@@ -354,6 +360,7 @@ Load a ROM file and optionally restore a save state path or slot. Returns the RO
 | `saveStatePath` | string |  | Optional save-state file path |
 | `saveStateSlot` | integer |  | Optional save-state slot 1-10 |
 | `requireRomMatch` | boolean |  | Reject a save state whose sidecar names a different ROM (default true). A state without a sidecar is always loaded here. |
+| `paused` | boolean |  | Do not leave the emulator running. Without a save state the console is power-cycled and stopped before its first boot instruction (frame 0, nothing has run), so the next run_script sees the whole boot code; with a save state it stays paused at that state. Default false: emulation resumes at once. |
 
 #### `get_rom_info`
 
@@ -371,9 +378,11 @@ Stop emulation and exit MCP server.
 
 #### `reset`
 
-Soft reset emulation.
+Reset the console and stop before the first boot instruction. mode soft (default) is the console's reset button (WRAM is kept); mode power is a power cycle (ROM reloaded, RAM re-initialized, frame counter back to 0, like a cold boot). Returns the CPU state at the reset vector. A power cycle builds a new debugger, so loaded scripts (and Lua-backed log/count breakpoints) are dropped (scriptsDropped); native breakpoints and labels are re-applied. Load a script afterwards (or use run_script with fromReset) to watch the boot code.
 
-_No parameters._
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `mode` | string |  | soft (default) or power |
 
 #### `pause`
 
@@ -1016,6 +1025,7 @@ Atomic experiment: pause, load a script (with optional kit includes), advance fr
 | `turbo` | boolean |  | Run without the frame limiter |
 | `unloadAfter` | boolean |  | Unload the script afterwards (default true) |
 | `maxLog` | integer |  | Maximum log rows returned (default 500) |
+| `fromReset` | string |  | Start from a reset: power (cold boot, RAM re-initialized, frame counter 0; true also means power) or soft (reset button, WRAM kept). The script is loaded before the first boot instruction, so it sees all of the boot code. A power cycle unloads other scripts. |
 | `includes` | array<string> |  | Kit modules to load first, for example ["mesen_kit"] |
 
 #### `get_script_log`
@@ -1069,6 +1079,7 @@ Run a shipped recipe (see list_recipes) like run_script: pause, load kit and rec
 | `timeoutMs` | integer |  | Give up after this many milliseconds |
 | `turbo` | boolean |  | Run without the frame limiter |
 | `unloadAfter` | boolean |  | Unload the script afterwards (default true) |
+| `fromReset` | string |  | Start from a reset: power (cold boot, RAM re-initialized, frame counter 0; true also means power) or soft (reset button, WRAM kept). The script is loaded before the first boot instruction, so it sees all of the boot code. A power cycle unloads other scripts. |
 | `maxLog` | integer |  | Maximum log rows returned (default 500) |
 
 ### Server and events
