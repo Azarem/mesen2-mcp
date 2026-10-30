@@ -1,61 +1,57 @@
-# Mesen
+# Mesen2 MCP
 
-Mesen is a multi-system emulator (NES, SNES, Game Boy, Game Boy Advance, PC Engine, SMS/Game Gear, WonderSwan) for Windows, Linux and macOS.  
+[![Build](https://github.com/Azarem/mesen2-mcp/actions/workflows/build.yml/badge.svg)](https://github.com/Azarem/mesen2-mcp/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/Azarem/mesen2-mcp)](https://github.com/Azarem/mesen2-mcp/releases/latest)
 
-## Releases
+A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that lets an AI client drive the [Mesen2](https://github.com/SourMesen/Mesen2) emulator and its debugger. It runs headless, talks JSON-RPC over stdio, and exposes 80 tools: load ROMs, step the CPU, read and write memory, set breakpoints, trace execution, take screenshots, record and replay input, and run Lua scripts, all with frame-exact, scriptable control.
 
-The latest stable version of the Mesen emulator is available from the [releases on GitHub](https://github.com/SourMesen/Mesen2/releases).  
+It is a fork of Mesen2 that keeps the emulation core and adds the server on top. The server is a regular **.NET 8** application (`dotnet MesenMcpHost.dll`); there is no installer and no desktop UI to open.
 
-**MCP server (this fork):** download the latest zip from the [mesen2-mcp releases](https://github.com/Azarem/mesen2-mcp/releases/latest) and follow the [installation instructions](#installation).  
+## Features
 
-## Development Builds
+- **Run and step:** load ROMs and save states, advance frames (optionally without the frame limiter, 200-370 frames per second), step instructions, scanlines or cycles, run until a condition holds.
+- **Inspect:** read and write any memory type, snapshot and diff memory, disassemble, call stack, labels (`.mlb`, `.sym`, `.json`), PPU, DMA and sprite state, palettes, tilemaps.
+- **Debug:** halting breakpoints with conditions, non-halting count and log breakpoints, execution traces to files, code/data log (CDL), profiler, access counters.
+- **See:** in-process PNG screenshots with crop, scale and per-layer rendering.
+- **Control input:** hold buttons, play frame-exact sequences, record input to a file and replay it, with the ROM SHA-1 verified.
+- **Script:** Lua scripting with a helper kit and ready-made recipes; atomic `run_script` experiments.
+- **Compare:** two ROMs in two slots, replaying the same input and reporting the first divergence (useful for ROM hacks and rebuilds).
+- **Stay safe:** save states and recordings are bound to the ROM they were made with, output files are sandboxed to a results folder, and a built-in `self_test` verifies the setup.
 
-[![Mesen](https://github.com/SourMesen/Mesen2/actions/workflows/build.yml/badge.svg)](https://github.com/SourMesen/Mesen2/actions/workflows/build.yml)
+The server works with the systems Mesen2 emulates. The PPU, DMA, OAM and tilemap tools are written for the SNES, and most of the testing was done there; the memory, CPU, breakpoint, trace and scripting tools are generic.
 
-#### <ins>Native builds</ins> (recommended) ####
+## Quick start
 
-These builds don't require .NET to be installed.  
+1. Install the [.NET 8 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0). On Linux and macOS also install SDL2.
+2. Download the zip for your platform from the [latest release](https://github.com/Azarem/mesen2-mcp/releases/latest) and extract it to a permanent folder.
+3. Add the server to your MCP client (Cursor shown; other clients are covered [below](#4-register-the-server-with-your-mcp-client)):
 
-* [Windows 10 / 11](https://nightly.link/SourMesen/Mesen2/workflows/build/master/Mesen%20%28Windows%20-%20net8.0%20-%20AoT%29.zip)  
-* [Linux x64](https://nightly.link/SourMesen/Mesen2/workflows/build/master/Mesen%20%28Linux%20-%20ubuntu-22.04%20-%20clang_aot%29.zip)  (requires **SDL2**)
-* [macOS - Intel](https://nightly.link/SourMesen/Mesen2/workflows/build/master/Mesen%20%28macOS%20-%20macos-13%20-%20clang_aot%29.zip)  (requires **SDL2**)
-* [macOS - Apple Silicon](https://nightly.link/SourMesen/Mesen2/workflows/build/master/Mesen%20%28macOS%20-%20macos-14%20-%20clang_aot%29.zip)  (requires **SDL2**)
+```json
+{
+  "mcpServers": {
+    "mesen2-mcp": {
+      "command": "dotnet",
+      "args": ["C:/Tools/mesen2-mcp/MesenMcpHost.dll"]
+    }
+  }
+}
+```
 
-#### <ins>.NET builds</ins> ####
+4. Ask the client to `load_rom` one of your ROM files, then `advance_frame` and `take_screenshot`.
 
-These builds require **.NET 8** to be installed (except the Windows 7 build which requires .NET 6).  
-For Linux and macOS, **SDL2** must also be installed.
+No ROMs are included. Use only ROMs you are entitled to use.
 
-* [Windows 7 / 8 (.NET 6)](https://nightly.link/SourMesen/Mesen2/workflows/build/master/Mesen%20%28Windows%20-%20net6.0%29.zip)  
-* [Linux x64 - AppImage](https://nightly.link/SourMesen/Mesen2/workflows/build/master/Mesen%20(Linux%20x64%20-%20AppImage).zip)  
-* [Linux ARM64](https://nightly.link/SourMesen/Mesen2/workflows/build/master/Mesen%20%28Linux%20-%20ubuntu-22.04-arm%20-%20clang%29.zip)  
-* [Linux ARM64 - AppImage](https://nightly.link/SourMesen/Mesen2/workflows/build/master/Mesen%20(Linux%20ARM64%20-%20AppImage).zip)
+## Installation
 
-
-#### <ins>Notes</ins> ####
-
-Other builds are also available in the [Actions](https://github.com/SourMesen/Mesen2/actions) tab.
-
-**SteamOS**: See [SteamOS.md](SteamOS.md)
-
-## Compiling
-
-See [COMPILING.md](COMPILING.md)
-
-## MCP Server Mode
-
-This fork includes an in-process C# [Model Context Protocol](https://modelcontextprotocol.io) server that drives the emulator and its debugger over stdio JSON-RPC. It exposes 80 tools: ROM and state control, stepping, memory, labels, breakpoints (halting, counting and logging), tracing, code/data log, screenshots, PPU/DMA/OAM state, input recording and replay, Lua scripting with a helper kit, two-ROM comparison and a self test.
-
-### Installation
-
-#### 1. Requirements
+### 1. Requirements
 
 - The [.NET 8 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (the "Runtime", not the SDK, is enough). Check with `dotnet --list-runtimes`; you need a `Microsoft.NETCore.App 8.x` line.
 - A 64-bit OS: Windows x64, Linux x64 or arm64, macOS x64 or Apple Silicon. Pick the release zip that matches.
+- **Linux and macOS only:** SDL2, which the native emulation core links against even when running headless. Linux: `sudo apt install libsdl2-2.0-0` (Debian/Ubuntu) or your distribution's `SDL2` package. macOS: `brew install sdl2`. Windows needs nothing besides .NET.
 - An MCP client that can start a stdio server (Cursor, Claude Desktop, Claude Code, VS Code, Codex CLI, ...).
 - Your own ROM files. No ROMs are included.
 
-#### 2. Download
+### 2. Download
 
 1. Open the [latest release](https://github.com/Azarem/mesen2-mcp/releases/latest) (all versions: [Releases](https://github.com/Azarem/mesen2-mcp/releases)).
 2. Download the zip for your platform, for example `mesen2-mcp-win-x64.zip`, `mesen2-mcp-linux-x64.zip`, `mesen2-mcp-osx-arm64.zip`.
@@ -67,15 +63,15 @@ This fork includes an in-process C# [Model Context Protocol](https://modelcontex
 | Linux | `~/.local/share/mesen2-mcp` |
 | macOS | `~/Library/Application Support/mesen2-mcp` or `~/mesen2-mcp` |
 
-The folder is the .NET `Release` output: `MesenMcpHost.dll` (the server), `Mesen.dll` and the native core, the Avalonia/Skia libraries, and `lua/lib/` (the Lua kit and recipes). You start the server with `dotnet MesenMcpHost.dll`; there is nothing to install and no installer to run.
+The zip holds a framework-dependent .NET 8 publish: `MesenMcpHost.dll` (the server), `Mesen.dll` (the emulator integration), the native core (`MesenCore.dll`, `.so` or `.dylib`), the Skia/HarfBuzz libraries, and `lua/lib/` (the Lua kit and recipes). You start the server with `dotnet MesenMcpHost.dll`; there is nothing to install and no installer to run. Each release also lists `SHA256SUMS.txt` to verify the downloads.
 
 Per-OS steps after extracting:
 
 - **Windows:** if SmartScreen or "blocked file" warnings appear, unblock the zip before extracting (right click, Properties, Unblock) or run `Get-ChildItem C:\Tools\mesen2-mcp -Recurse | Unblock-File` in PowerShell.
 - **macOS:** remove the download quarantine flag: `xattr -dr com.apple.quarantine ~/mesen2-mcp`.
-- **Linux:** nothing extra. If the native libraries fail to load, install `libfontconfig1` (needed by SkiaSharp).
+- **Linux:** make sure SDL2 is installed (see Requirements). If the native libraries still fail to load, install `libfontconfig1` (needed by SkiaSharp).
 
-#### 3. Check that it starts
+### 3. Check that it starts
 
 The server speaks JSON-RPC on stdin/stdout, so it simply waits for a client. This sends one `initialize` request and should print a JSON line containing `"serverInfo"`:
 
@@ -89,7 +85,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 On first start the server unpacks the remaining native files into the Mesen home folder (`Documents\Mesen2` on Windows, `~/.config/Mesen2` on Linux, `~/Library/Application Support/Mesen2` on macOS). A ROM is not needed to start. Load one with the `load_rom` tool, or pass `--mcp-rom=<file>` in the client configuration.
 
-#### 4. Register the server with your MCP client
+### 4. Register the server with your MCP client
 
 Every client needs the same three things: the command `dotnet`, the **absolute** path to `MesenMcpHost.dll` as the first argument, and optional [startup flags](#startup-flags). Use forward slashes in JSON on Windows. Restart the client (or reload its MCP servers) after editing a config file.
 
@@ -155,7 +151,7 @@ Optional settings for any of them: `"env": {"MESEN_MCP_DEBUG": "1"}` writes the 
       "command": "dotnet",
       "args": [
         "C:/Tools/mesen2-mcp/MesenMcpHost.dll",
-        "--mcp-rom=C:/Work/gaia-iog-baserom/rebuilt/Illusion of Gaia - Rebuilt.smc"
+        "--mcp-rom=C:/Roms/my-game-rebuilt.smc"
       ]
     }
   }
@@ -164,41 +160,72 @@ Optional settings for any of them: `"env": {"MESEN_MCP_DEBUG": "1"}` writes the 
 
 If the client cannot find `dotnet` (common for macOS and Linux desktop apps, which do not inherit your shell `PATH`), put the full path in `command`: the output of `which dotnet`, for example `/usr/local/share/dotnet/dotnet`, `/opt/homebrew/bin/dotnet` or `/usr/bin/dotnet`.
 
-#### 5. First session
+### 5. First session
 
 Ask the client to call `load_rom` with the absolute path of a ROM, then `get_rom_info`, `advance_frame` and `take_screenshot`. When those work, the rest of the tools (see [Tool Reference](#tool-reference)) are available. The built-in `self_test` tool checks the scripting and emulation features on your machine.
 
-#### Updating and uninstalling
+## Updating and uninstalling
 
 Stop the server in your client (or quit the client) so the DLLs are not locked, extract the new zip over the folder (delete the old folder first to drop removed files), and restart the client. To uninstall, delete the folder, remove the entry from the client configuration, and optionally delete the Mesen home folder named above.
 
-#### Troubleshooting
+## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
 | Client shows the server as failed or "spawn dotnet ENOENT" | `dotnet` is not on the client's `PATH`. Use the full path to `dotnet` in `command`. |
 | "You must install or update .NET" | The .NET 8 runtime is missing. A newer runtime alone is not enough unless roll-forward is enabled: install the 8.x runtime or set `DOTNET_ROLL_FORWARD=Major` in `env`. |
-| `DllNotFoundException` for `MesenCore` | The native core is missing or from another platform. Re-extract the zip for your OS and CPU; do not mix files from different releases. |
+| `DllNotFoundException` for `MesenCore` | The native core is missing or from another platform. Re-extract the zip for your OS and CPU; do not mix files from different releases. On Linux and macOS this also happens when SDL2 is not installed (`ldd MesenCore.so` or `otool -L MesenCore.dylib` shows `libSDL2` as not found). |
 | Server starts but tools time out | The ROM is large or the machine slow: pass `timeoutMs` to the stepping tool, or use `turbo`. |
 | Build or update fails with "file is being used by another process" | The client still runs the old host. Stop the server first. |
 | Garbage or JSON errors on the client | Something wrote to stdout. Do not wrap the host in a script that prints; run `dotnet MesenMcpHost.dll` directly. |
 | Need more detail | Set `MESEN_MCP_DEBUG=1` and read the client's MCP log, or call `get_capabilities` and `self_test`. |
 
-#### Releasing (maintainers)
+## Building from source
 
-The version lives in one place, the `VERSION` file at the repo root (it becomes the host's assembly version and the `serverVersion` the tools report). The GitHub workflow `.github/workflows/build.yml` builds and smoke-tests the host on Windows, Linux (x64, arm64) and macOS (x64, arm64) for every push to `master` and every pull request. When `VERSION` holds a version that has no release yet, it also creates the tag `v<VERSION>` and a GitHub release with one zip per platform (`mesen2-mcp-<rid>.zip`). To publish: edit `VERSION`, commit, push to `master`.
+Only .NET builds are supported: there are no NativeAOT or single-file builds. The server needs the C++ emulation core (`MesenCore`) compiled first, then the managed host is built on top of it. This is exactly what `.github/workflows/build.yml` does for every release.
 
-#### Building from source
+**Prerequisites:** the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0), Python 3 (for the tests), and a C++ toolchain:
+
+- Windows: Visual Studio 2022 with the "Desktop development with C++" workload (MSBuild).
+- Linux: `clang`, `make`, `zip` and the SDL2 development package (`sudo apt install clang make zip libsdl2-dev`).
+- macOS: Xcode command line tools, `brew install sdl2`.
+
+Pick the runtime identifier for your machine: `win-x64`, `linux-x64`, `linux-arm64`, `osx-x64` or `osx-arm64` (`<rid>` below).
 
 ```
 git clone https://github.com/Azarem/mesen2-mcp.git
 cd mesen2-mcp
-dotnet build McpHost/McpHost.csproj -c Release
+
+# 1. Native core. Windows (Developer PowerShell or Command Prompt):
+msbuild Mesen.sln -m -p:Configuration=Release -p:Platform=x64 -t:InteropDLL
+#    Linux / macOS (copies the core where the .NET build expects it):
+make core -j4
+mkdir -p bin/<rid>/Release && cp InteropDLL/obj.<rid>/MesenCore.* bin/<rid>/Release/
+
+# 2. Managed host. Run the build once, then publish (the first pass only collects the
+#    Skia/HarfBuzz native libraries that go into the embedded Dependencies.zip):
+dotnet build   McpHost/McpHost.csproj -c Release -r <rid> --self-contained false -p:OptimizeUi=true -p:SolutionDir=$PWD
+dotnet publish McpHost/McpHost.csproj -c Release -r <rid> --self-contained false -p:OptimizeUi=true -p:SolutionDir=$PWD -o dist/mesen2-mcp
+
+# 3. Add the native core to the output and check it
+cp bin/<rid>/Release/MesenCore.* dist/mesen2-mcp/
+python tools/verify_release.py dist/mesen2-mcp <rid> --deps-zip bin/<rid>/Release/Dependencies.zip
+python tools/mcp_smoke_test.py dotnet dist/mesen2-mcp/MesenMcpHost.dll
 ```
 
-The output is `McpHost/bin/Release/net8.0/`, the same folder the release zip contains. The alternate entry point is `Mesen --mcp-server` (the UI executable). Rebuilding fails while a client has the host running (the DLLs are locked); stop the server first. For the full emulator build (native core, UI) see [COMPILING.md](COMPILING.md).
+On Windows run steps 2 and 3 in PowerShell (the commands work as written; Git Bash would pass `$PWD` as a non-Windows path, so use `$(pwd -W)` there). `dist/mesen2-mcp` is the folder the release zip contains. Stop a running server before rebuilding: its DLLs are locked while a client has it open.
 
-### Startup flags
+## Releasing (maintainers)
+
+The version lives in one place, the `VERSION` file at the repo root (it becomes the host's assembly version and the `serverVersion` the tools report). The workflow `.github/workflows/build.yml`:
+
+1. builds the native core and the .NET host on Windows x64, Linux x64/arm64 and macOS x64/arm64 for every push to `master` and every pull request,
+2. verifies the published folder (`tools/verify_release.py`) and smoke-tests the server over stdio, including that it reports the `VERSION` it was built from (`tools/mcp_smoke_test.py`),
+3. on a push to `master`, when `VERSION` has no release yet, creates the tag `v<VERSION>` and a GitHub release with one zip per platform (`mesen2-mcp-<rid>.zip`) and `SHA256SUMS.txt`.
+
+To publish: edit `VERSION`, commit, push to `master`.
+
+## Startup flags
 
 | Flag | Meaning |
 |---|---|
@@ -209,7 +236,7 @@ The output is `McpHost/bin/Release/net8.0/`, the same folder the release zip con
 | `--mcp-lib-dir=<dir>` | Folder with the Lua kit modules and recipes. Default `lua/lib` next to the host, else `tools/lua/lib`. |
 | `--mcp-video`, `--mcp-audio`, `--mcp-input` | Enable video output, audio output, live input devices. All are off by default (headless, fastest). Screenshots do not need `--mcp-video`. |
 
-### Conventions
+## Conventions
 
 - **Transport.** stdout carries only JSON-RPC; native logging goes to stderr. Tool calls run one at a time. An argument that is not in a tool's schema is rejected with an error, not ignored.
 - **Results.** A tool returns one JSON text block (`take_screenshot` also returns a PNG image block). A few legacy tools (`read_memory` with `format: "hex"`, for example) return plain text.
@@ -222,14 +249,14 @@ The output is `McpHost/bin/Release/net8.0/`, the same folder the release zip con
 - **Slots (two ROMs).** Every tool accepts an optional `slot` string. `load_rom {path, slot}` registers the ROM under that name; any other tool called with `slot` first switches to that ROM (the server saves the state and labels of the slot it leaves, and restores the other). `list_slots`, `switch_slot` and `compare_runs` build on this.
 - **Events.** The server sends `notifications/mesen/event` notifications. By default: `breakpoint_hit`, `game_loaded`, `game_paused`, `game_resumed`, `emulation_stopped`. `subscribe_events` selects the set and adds `state_loaded`, `frame_end`, `script_log` and `error`.
 
-### Breakpoints and conditions
+## Breakpoints and conditions
 
 `set_breakpoints` takes a list of `{callbackType (read|write|exec, comma list), startAddress, endAddress, memType, condition, action, maxLogged, name}`.
 
 - `action: "break"` (default) is a native breakpoint that halts emulation. Its `condition` is checked with the native expression evaluator (a bad one fails with `invalid_condition`).
 - `action: "count"` and `"log"` never halt. They run as a hidden Lua script, so their conditions use this subset of the Mesen syntax: `value`, `oldvalue`, `address`, `pc`, `a`, `x`, `y`, `sp`, `d`, `k`, `dbr`, `ps`, `frame`, `[addr]`, `{addr}` and `&& || ! != ^ /`. Read the counts and logged rows with `get_breakpoint_hits`.
 
-### Lua scripting
+## Lua scripting
 
 `run_script {code, frames, includes?}` pauses, loads the script, advances, collects the log and the result, and unloads it. `load_script` keeps a script running across calls. The server prepends a one-line prelude (user line numbers do not shift) that adds:
 
@@ -246,7 +273,7 @@ The output is `McpHost/bin/Release/net8.0/`, the same folder the release zip con
 
 `list_recipes` and `run_recipe {name, args?, frames?}` run ready-made scripts: `warp`, `census_pc`, `exec_coverage`. In a recipe the Lua table `args` holds the arguments.
 
-### Typical workflows
+## Typical workflows
 
 ```
 load_rom {path}                          -> fileSha1, header
@@ -260,7 +287,7 @@ record_input {action: "start", path: "run1.json"} ... record_input {action: "sto
 load_rom {path: rebuilt, slot: "rebuilt"} ; compare_runs {inputFile: "run1.json", watch: [{name: "scene", address: 0x7E0642}]}
 ```
 
-### Tests and tooling
+## Tests and tooling
 
 All tests run against a real ROM and take `--host <MesenMcpHost.dll>` (use the Debug build while a client holds the Release DLLs):
 
@@ -270,6 +297,8 @@ All tests run against a real ROM and take `--host <MesenMcpHost.dll>` (use the D
 | `python tools/mcp_week2_test.py` | Labels, turbo and `run_until`, result files, Lua kit and recipes |
 | `python tools/mcp_week3_test.py` | Breakpoints, memory, trace, screenshots, PPU state, input, events, slots, `self_test` |
 | `python tools/mcp_iog_e2e_test.py` | End to end: Illusion of Gaia warped into Edward's Castle |
+| `python tools/mcp_smoke_test.py dotnet <MesenMcpHost.dll>` | No ROM needed: starts the server, checks `initialize`, the version and the tool list, then `stop` (used by CI) |
+| `python tools/verify_release.py <dist> <rid>` | No ROM needed: checks a published folder for every file the server needs (used by CI) |
 | `python tools/gen_api_docs.py` | Regenerates the tool reference below from the live `tools/list` |
 
 The `self_test` tool checks the Lua and emulator features scripts rely on (memory callbacks, `emu.setInput`, Lua save states, log harvest, stepping, state files, breakpoints, CDL, sandbox, screen buffer) and restores the emulator state afterwards.
@@ -1046,9 +1075,11 @@ Choose which server events are sent as notifications/mesen/event. Types and payl
 
 <!-- MCP-API:END -->
 
-## License
+## Credits and license
 
-Mesen is available under the GPL V3 license.  Full text here: <http://www.gnu.org/licenses/gpl-3.0.en.html>
+This project is a fork of [Mesen2](https://github.com/SourMesen/Mesen2) by Sour (SourMesen). The emulation core and debugger are Mesen2's; the MCP server (`UI/Mcp`, `McpHost`, `tools`) is added on top. Thanks to everyone who contributed to Mesen2.
+
+Mesen is available under the GPL V3 license. Full text here: <http://www.gnu.org/licenses/gpl-3.0.en.html>
 
 Copyright (C) 2014-2025 Sour
 

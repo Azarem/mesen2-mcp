@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -111,6 +112,16 @@ def main():
         if "capabilities" not in init_result:
             raise RuntimeError("initialize response is missing capabilities")
 
+        # The host version comes from the VERSION file at the repo root; a release must report it.
+        version_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")
+        if os.path.isfile(version_file):
+            with open(version_file, encoding="utf-8") as f:
+                expected_version = f.read().strip()
+            reported_version = (init_result.get("serverInfo") or {}).get("version")
+            if reported_version != expected_version:
+                raise RuntimeError(
+                    f"serverInfo.version is {reported_version!r}, expected {expected_version!r} (VERSION file)")
+
         send_message(
             proc.stdin,
             {
@@ -132,7 +143,11 @@ def main():
         tools_result = read_response_for_id(proc.stdout, 2)
         tools = tools_result.get("tools", [])
         names = {tool.get("name") for tool in tools}
-        required = {"load_rom", "get_capabilities", "get_disassembly"}
+        required = {
+            "load_rom", "get_rom_info", "advance_frame", "read_memory", "write_memory",
+            "set_breakpoints", "get_disassembly", "take_screenshot", "run_script",
+            "get_capabilities", "self_test", "stop",
+        }
         missing = sorted(required - names)
         if missing:
             raise RuntimeError(f"tools/list missing required tools: {missing}")

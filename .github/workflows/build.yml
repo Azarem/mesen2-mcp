@@ -1,8 +1,15 @@
-name: Build MCP host
+name: Build MCP server
 
-# Every push to master and every pull request builds and tests the MCP host on all platforms.
-# A release is published only when the VERSION file holds a version that has no tag yet:
-# bump VERSION (for example 0.4.0 -> 0.5.0), push to master, and v0.5.0 is released.
+# Builds the standalone MCP server (a framework-dependent .NET 8 release, one zip per platform).
+#
+#  * Every push to master and every pull request builds, verifies and smoke-tests the server on
+#    Windows x64, Linux x64/arm64 and macOS x64/arm64.
+#  * A release is published only when the VERSION file holds a version that has no tag yet:
+#    bump VERSION (for example 0.4.0 -> 0.5.0), push to master, and v0.5.0 is released.
+#
+# The only native code is the C++ emulation core (MesenCore). It is compiled here and shipped in
+# the zip next to the managed host, so the release needs nothing but the .NET 8 runtime (plus SDL2
+# on Linux and macOS, which the core links against). There are no NativeAOT builds.
 
 on:
   push:
@@ -10,22 +17,32 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  DOTNET_NOLOGO: 1
 
 jobs:
   build:
+    name: Build ${{ matrix.rid }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { rid: win-x64,     os: windows-latest,  lib: MesenCore.dll }
-          - { rid: linux-x64,   os: ubuntu-22.04,    lib: MesenCore.so }
+          - { rid: win-x64,     os: windows-latest,   lib: MesenCore.dll }
+          - { rid: linux-x64,   os: ubuntu-22.04,     lib: MesenCore.so }
           - { rid: linux-arm64, os: ubuntu-22.04-arm, lib: MesenCore.so }
-          - { rid: osx-x64,     os: macos-15-intel,  lib: MesenCore.dylib }
-          - { rid: osx-arm64,   os: macos-14,        lib: MesenCore.dylib }
+          - { rid: osx-x64,     os: macos-15-intel,   lib: MesenCore.dylib }
+          - { rid: osx-arm64,   os: macos-14,         lib: MesenCore.dylib }
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -36,6 +53,19 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.x
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+
+      - name: Check VERSION
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          echo "VERSION = $version"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=VERSION::VERSION must look like 1.2.3 (got '$version')"
+            exit 1
+          fi
 
       # ---- native emulation core (MesenCore) ------------------------------------------------
       - name: Set up MSBuild
@@ -52,7 +82,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qy
-          sudo apt-get install -qy libsdl2-dev
+          sudo apt-get install -qy clang libsdl2-dev
           make core -j$(nproc) LTO=true STATICLINK=true SYSTEM_LIBEVDEV=false
           mkdir -p bin/${{ matrix.rid }}/Release
           cp InteropDLL/obj.${{ matrix.rid }}/${{ matrix.lib }} bin/${{ matrix.rid }}/Release/
@@ -65,15 +95,29 @@ jobs:
           mkdir -p bin/${{ matrix.rid }}/Release
           cp InteropDLL/obj.${{ matrix.rid }}/${{ matrix.lib }} bin/${{ matrix.rid }}/Release/
 
-      # ---- MCP host ----------------------------------------------------------------------------
-      # The first build only unpacks the NuGet native libraries into bin/<rid>/Release, which the
-      # UI project's pre-build step zips into Dependencies.zip (the makefile does the same twice).
+      - name: Check native core
+        run: |
+          core="bin/${{ matrix.rid }}/Release/${{ matrix.lib }}"
+          if [ ! -s "$core" ]; then
+            echo "::error::native core $core was not produced"
+            exit 1
+          fi
+          ls -l "$core"
+
+      # ---- MCP host (managed, .NET 8) ---------------------------------------------------------
+      # The UI project zips the native libraries into Dependencies.zip, which is embedded into
+      # Mesen.dll (the host unpacks it on first start). The Skia/HarfBuzz native libraries only
+      # land in bin/<rid>/Release after a first build, so the build runs twice (the makefile does
+      # the same). Only the second run, the publish, has to succeed.
       - name: Build MCP host
         run: |
           args="-c Release -r ${{ matrix.rid }} --self-contained false -p:OptimizeUi=true -p:SolutionDir=$GITHUB_WORKSPACE"
-          dotnet build McpHost/McpHost.csproj $args || true
+          dotnet build McpHost/McpHost.csproj $args || echo "::warning::first build pass failed; the publish below decides"
           dotnet publish McpHost/McpHost.csproj $args -o dist/mesen2-mcp
           cp bin/${{ matrix.rid }}/Release/${{ matrix.lib }} dist/mesen2-mcp/
+
+      - name: Verify release contents
+        run: python tools/verify_release.py dist/mesen2-mcp ${{ matrix.rid }} --deps-zip bin/${{ matrix.rid }}/Release/Dependencies.zip
 
       - name: Smoke test
         run: python tools/mcp_smoke_test.py dotnet dist/mesen2-mcp/MesenMcpHost.dll
@@ -87,6 +131,7 @@ jobs:
         with:
           name: mesen2-mcp-${{ matrix.rid }}
           path: mesen2-mcp-${{ matrix.rid }}.zip
+          if-no-files-found: error
 
   # Publishes a GitHub release when VERSION has no tag yet.
   release:
@@ -95,6 +140,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -118,8 +166,19 @@ jobs:
           merge-multiple: true
           path: release
 
+      - name: Check release assets
+        if: steps.version.outputs.new == 'true'
+        run: |
+          for rid in win-x64 linux-x64 linux-arm64 osx-x64 osx-arm64; do
+            if [ ! -s "release/mesen2-mcp-$rid.zip" ]; then
+              echo "::error::release/mesen2-mcp-$rid.zip is missing"
+              exit 1
+            fi
+          done
+          (cd release && sha256sum mesen2-mcp-*.zip > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
       - name: Create release
         if: steps.version.outputs.new == 'true'
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" release/*.zip \
+          gh release create "${{ steps.version.outputs.tag }}" release/*.zip release/SHA256SUMS.txt \
             --target "$GITHUB_SHA" --title "${{ steps.version.outputs.tag }}" --generate-notes
