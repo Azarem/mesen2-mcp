@@ -40,7 +40,7 @@ jobs:
           - { rid: linux-x64,   os: ubuntu-22.04,     lib: MesenCore.so }
           - { rid: linux-arm64, os: ubuntu-22.04-arm, lib: MesenCore.so }
           - { rid: osx-x64,     os: macos-15-intel,   lib: MesenCore.dylib }
-          - { rid: osx-arm64,   os: macos-15-arm,     lib: MesenCore.dylib }
+          - { rid: osx-arm64,   os: macos-15,     lib: MesenCore.dylib }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     defaults:
